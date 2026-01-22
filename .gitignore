@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+instance/
+.env
+*.db
+*.sqlite
+*.sqlite3
+.DS_Store
+static/audio/
+static/covers/

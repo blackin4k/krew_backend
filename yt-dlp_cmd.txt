@@ -1,0 +1,10 @@
+yt-dlp ^
+--cookies cookies.txt ^
+--sleep-interval 5 ^
+--max-sleep-interval 10 ^
+--extractor-args "youtube:player_client=default" ^
+--no-overwrites ^
+-x --audio-format mp3 ^
+--playlist-start 308 ^
+--playlist-end 500 ^
+"https://music.youtube.com/playlist?list=PLp6mvS180ldRjS9x4By1DHIx6ud8J5ooO"

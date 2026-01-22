@@ -1,0 +1,133 @@
+
+# =========================================================
+# HISTORY & CAPSULE
+# =========================================================
+
+# 1. Record Play
+@app.route("/player/record-play", methods=["POST"])
+@jwt_required()
+def record_play():
+    user_id = int(get_jwt_identity())
+    data = request.json or {}
+    song_id = data.get("song_id")
+
+    if not song_id:
+        return jsonify(error="song_id required"), 400
+    
+    # Verify song exists
+    song = Song.query.get(song_id)
+    if not song:
+        return jsonify(error="Song not found"), 404
+
+    # Log it
+    log = PlayLog(
+        user_id=user_id,
+        song_id=song_id,
+        played_at=datetime.utcnow(),
+        completed=True # Assume standard play is 'completed' enough for history
+    )
+    db.session.add(log)
+    db.session.commit()
+
+    return jsonify(msg="Recorded")
+
+# 2. Get Recent
+@app.route("/me/recent")
+@jwt_required()
+def get_recent():
+    user_id = int(get_jwt_identity())
+    
+    # Get last 50 plays
+    logs = (
+        db.session.query(PlayLog, Song)
+        .join(Song, PlayLog.song_id == Song.id)
+        .filter(PlayLog.user_id == user_id)
+        .order_by(PlayLog.played_at.desc())
+        .limit(50)
+        .all()
+    )
+
+    # Dedup by song_id consecutive? Or just list them? 
+    # Usually recents is a straight list. 
+    # Let's map to song objects.
+    
+    return jsonify([
+        {
+            "id": s.id,
+            "title": s.title,
+            "artist": s.artist,
+            "cover": full_url(f"/covers/{s.cover_file}") if s.cover_file else None,
+            "played_at": log.played_at.isoformat()
+        }
+        for log, s in logs
+    ])
+
+# 3. Capsule Stats
+@app.route("/capsule/stats")
+@jwt_required()
+def get_capsule_stats():
+    user_id = int(get_jwt_identity())
+    
+    # Aggregations
+    
+    # Total minutes (Estimate 3 mins per song if duration missing, or use count)
+    # Since PlayLog.listen_duration is 0 by default, let's just count total plays
+    total_plays = PlayLog.query.filter_by(user_id=user_id).count()
+    total_minutes = total_plays * 3 # Rough estimate: 3 mins per song
+    
+    # Top Songs
+    top_songs_raw = (
+        db.session.query(Song, db.func.count(PlayLog.id).label("plays"))
+        .join(PlayLog, PlayLog.song_id == Song.id)
+        .filter(PlayLog.user_id == user_id)
+        .group_by(Song.id)
+        .order_by(desc("plays"))
+        .limit(5)
+        .all()
+    )
+    
+    top_songs = [
+        {
+            "id": s.id,
+            "title": s.title,
+            "artist": s.artist,
+            "cover": full_url(f"/covers/{s.cover_file}") if s.cover_file else None,
+            "plays": plays
+        }
+        for s, plays in top_songs_raw
+    ]
+    
+    # Top Artists
+    # Sqlite group by artist string
+    top_artists_raw = (
+        db.session.query(Song.artist, db.func.count(PlayLog.id).label("plays"))
+        .join(PlayLog, PlayLog.song_id == Song.id)
+        .filter(PlayLog.user_id == user_id)
+        .group_by(Song.artist)
+        .order_by(desc("plays"))
+        .limit(5)
+        .all()
+    )
+    
+    top_artists = [{"name": a, "plays": p} for a, p in top_artists_raw]
+
+    # Top Genres
+    top_genres_raw = (
+        db.session.query(Song.genre, db.func.count(PlayLog.id).label("plays"))
+        .join(PlayLog, PlayLog.song_id == Song.id)
+        .filter(PlayLog.user_id == user_id)
+        .filter(Song.genre != None)
+        .group_by(Song.genre)
+        .order_by(desc("plays"))
+        .limit(5)
+        .all()
+    )
+    
+    top_genres = [{"genre": g, "plays": p} for g, p in top_genres_raw]
+
+    return jsonify({
+        "total_minutes": total_minutes,
+        "top_songs": top_songs,
+        "top_artists": top_artists,
+        "top_genres": top_genres
+    })
