@@ -344,56 +344,57 @@ def log_request_info():
         print(f"Origin: {request.headers.get('Origin')}")
 
 
+
 # =========================================================
-# DISCORD PRESENCE
+# DISCORD PRESENCE (Disabled for deployment)
 # =========================================================
-from pypresence import Presence
-import threading
-
-DISCORD_CLIENT_ID = '1330458763539513364'
-
-class DiscordService:
-    def __init__(self, client_id):
-        self.client_id = client_id
-        self.rpc = None
-        self.connected = False
-        self.last_track = None
-
-    def connect(self):
-        try:
-            self.rpc = Presence(self.client_id)
-            self.rpc.connect()
-            self.connected = True
-            print("Discord RPC Connected")
-        except:
-            self.connected = False
-
-    def update(self, title, artist):
-        if self.last_track == (title, artist):
-            return
-
-        def _update():
-            if not self.connected:
-                self.connect()
-            
-            if self.connected:
-                try:
-                    self.rpc.update(
-                        details=title[:128],
-                        state=artist[:128],
-                        large_image="krew_logo",
-                        large_text="Krew Music",
-                        small_image="play_icon",
-                        small_text="Listening"
-                    )
-                    self.last_track = (title, artist)
-                except:
-                    self.connected = False
-        
-        threading.Thread(target=_update, daemon=True).start()
-
-discord_service = DiscordService(DISCORD_CLIENT_ID) 
-threading.Thread(target=discord_service.connect, daemon=True).start()
+# from pypresence import Presence
+# import threading
+# 
+# DISCORD_CLIENT_ID = '1330458763539513364'
+# 
+# class DiscordService:
+#     def __init__(self, client_id):
+#         self.client_id = client_id
+#         self.rpc = None
+#         self.connected = False
+#         self.last_track = None
+# 
+#     def connect(self):
+#         try:
+#             self.rpc = Presence(self.client_id)
+#             self.rpc.connect()
+#             self.connected = True
+#             print("Discord RPC Connected")
+#         except:
+#             self.connected = False
+# 
+#     def update(self, title, artist):
+#         if self.last_track == (title, artist):
+#             return
+# 
+#         def _update():
+#             if not self.connected:
+#                 self.connect()
+#             
+#             if self.connected:
+#                 try:
+#                     self.rpc.update(
+#                         details=title[:128],
+#                         state=artist[:128],
+#                         large_image="krew_logo",
+#                         large_text="Krew Music",
+#                         small_image="play_icon",
+#                         small_text="Listening"
+#                     )
+#                     self.last_track = (title, artist)
+#                 except:
+#                     self.connected = False
+#         
+#         threading.Thread(target=_update, daemon=True).start()
+# 
+# discord_service = DiscordService(DISCORD_CLIENT_ID) 
+# threading.Thread(target=discord_service.connect, daemon=True).start()
 
 
 def full_url(path):
