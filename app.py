@@ -18,7 +18,7 @@ from flask_jwt_extended import decode_token
 from sqlalchemy import or_, func, case, desc
 
 from sqlalchemy.exc import IntegrityError
-from flask import Flask, request, jsonify, send_file, send_from_directory
+from flask import Flask, request, jsonify, send_file, send_from_directory, redirect
 from flask import Response
 from flask_sqlalchemy import SQLAlchemy
 from flask_jwt_extended import (
@@ -1207,8 +1207,13 @@ def search():
 @app.route("/songs/<int:song_id>/stream")
 def stream_song(song_id):
     song = Song.query.get_or_404(song_id)
-    path = os.path.join(AUDIO_DIR, song.audio_file)
 
+    # In production, redirect to R2
+    if os.environ.get("FLASK_ENV") == "production":
+        return redirect(get_r2_audio_url(song.audio_file))
+
+    # In development, serve local
+    path = os.path.join(AUDIO_DIR, song.audio_file)
     if not os.path.exists(path):
         return jsonify(error="Audio missing"), 404
 
