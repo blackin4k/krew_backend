@@ -295,19 +295,8 @@ if not is_dev and not os.environ.get("JWT_SECRET_KEY"):
 # Note: dynamic origin reflection is required for withCredentials=true
 
 def is_allowed_origin(origin):
-    if not origin: return True  # Some mobile apps/tools don't send Origin
-    
-    origin = origin.lower()
-    return (
-        "localhost" in origin or
-        "127.0.0.1" in origin or
-        "192.168." in origin or
-        "10.0." in origin or
-        "capacitor://" in origin or
-        "ngrok" in origin or
-        "render.com" in origin or
-        "vercel.app" in origin
-    )
+    # TEMPORARY: Allow EVERYTHING to debug mobile data issues
+    return True
 
 @app.before_request
 def handle_options_request():
