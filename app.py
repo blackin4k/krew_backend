@@ -39,7 +39,6 @@ INSTANCE_DIR = os.path.join(BASE_DIR, "instance")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 AUDIO_DIR = os.path.join(STATIC_DIR, "audio")
 COVER_DIR = os.path.join(STATIC_DIR, "covers")
-
 os.makedirs(INSTANCE_DIR, exist_ok=True)
 os.makedirs(AUDIO_DIR, exist_ok=True)
 os.makedirs(COVER_DIR, exist_ok=True)
@@ -47,13 +46,8 @@ os.makedirs(COVER_DIR, exist_ok=True)
 app = Flask(__name__)
 
 # Configure CORS
-CORS(app, resources={
-    r"/*": {
-        "origins": ["*"],  # TODO: Replace with specific domains in production
-        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"]
-    }
-})
+# CORS handled manually below for maximum compatibility with mobile apps
+# CORS(app) - configuration removed in favor of manual headers
 
 # Database configuration - PostgreSQL in production, SQLite in development
 database_url = os.environ.get("DATABASE_URL")
