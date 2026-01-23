@@ -615,6 +615,12 @@ class SleepTimer(db.Model):
     fade_out = db.Column(db.Boolean, default=False)
 
 
+# =========================================================
+# AUTO-CREATE DATABASE TABLES ON STARTUP
+# =========================================================
+with app.app_context():
+    db.create_all()
+    print("✅ Database tables created/verified")
 
 # =========================================================
 # AUTH ROUTES
