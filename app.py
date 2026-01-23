@@ -400,6 +400,23 @@ def log_request_info():
 def full_url(path):
     return request.host_url.rstrip("/") + path
 
+# R2 Storage Configuration
+R2_PUBLIC_URL = os.environ.get("R2_PUBLIC_URL", "https://pub-5e22fa30a7744b769bea5ad23240ed75.r2.dev")
+
+def get_r2_cover_url(filename):
+    if not filename:
+        return None
+    if filename.startswith("http"):
+        return filename
+    return f"{R2_PUBLIC_URL}/covers/{filename}"
+
+def get_r2_audio_url(filename):
+    if not filename:
+        return None
+    if filename.startswith("http"):
+        return filename
+    return f"{R2_PUBLIC_URL}/audio/{filename}"
+
 def split_artists(artist_str):
     if not artist_str:
         return []
@@ -415,10 +432,16 @@ def split_artists(artist_str):
 
 @app.route("/covers/<filename>")
 def cover(filename):
+    # Redirect to R2 for production, serve local for development
+    if os.environ.get("FLASK_ENV") == "production":
+        return redirect(get_r2_cover_url(filename))
     return send_file(os.path.join(COVER_DIR, filename))
 
 @app.route("/audio/<path:filename>")
 def serve_audio(filename):
+    # Redirect to R2 for production, serve local for development
+    if os.environ.get("FLASK_ENV") == "production":
+        return redirect(get_r2_audio_url(filename))
     return send_from_directory(AUDIO_DIR, filename)
 from werkzeug.exceptions import HTTPException
 
