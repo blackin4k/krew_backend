@@ -301,23 +301,21 @@ def is_allowed_origin(origin):
 @app.before_request
 def handle_options_request():
     if request.method == "OPTIONS":
-        origin = request.headers.get("Origin")
-        if is_allowed_origin(origin):
-            response = Response()
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Allow-Credentials"] = "true"
-            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Accept, ngrok-skip-browser-warning"
-            return response
-
-@app.after_request
-def add_cors_headers(response):
-    origin = request.headers.get("Origin")
-    if is_allowed_origin(origin):
+        origin = request.headers.get("Origin", "*")
+        response = Response()
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Accept, ngrok-skip-browser-warning"
+        return response
+
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get("Origin", "*")
+    response.headers["Access-Control-Allow-Origin"] = origin
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Accept, ngrok-skip-browser-warning"
     return response
 
 
