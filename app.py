@@ -5,6 +5,9 @@
 # -------------------------
 # IMPORTS
 # -------------------------
+import eventlet
+eventlet.monkey_patch()
+
 import os
 import math
 import time
