@@ -13,6 +13,8 @@ import math
 import time
 import json
 import uuid
+import threading
+import requests
 from datetime import datetime, timedelta
 import random
 import hashlib
@@ -232,6 +234,7 @@ def record_play_top():
     user_id = int(get_jwt_identity())
     data = request.json or {}
     song_id = data.get("song_id")
+    duration = data.get("duration", 0) # Accept duration, default to 0
 
     if not song_id:
         return jsonify(error="song_id required"), 400
@@ -247,7 +250,7 @@ def record_play_top():
             song_id=song_id,
             played_at=datetime.utcnow(),
             completed=True,
-            listen_duration=0 
+            listen_duration=int(duration) # Store actual duration
         )
         db.session.add(log)
         db.session.commit()
@@ -3268,6 +3271,30 @@ def get_capsule_stats():
         "top_artists": top_artists,
         "top_genres": top_genres
     })
+
+
+# =========================================================
+# KEEP-ALIVE (FOR RENDER FREE TIER)
+# =========================================================
+
+def keep_alive_ping():
+    """Pings the backend health endpoint every 10 minutes to prevent sleeping."""
+    # Wait for the server to start
+    time.sleep(10)
+    url = "https://api.kreewaux.xyz/health"
+    print(f"🚀 Keep-alive thread started, targeting {url}")
+    
+    while True:
+        try:
+            # We don't care about the response, just that the request hit the server
+            requests.get(url, timeout=10)
+            print(f"📡 Keep-alive ping sent to {url}")
+        except Exception as e:
+            print(f"⚠️ Keep-alive ping failed: {e}")
+        time.sleep(600)  # 10 minutes
+
+# Start the keep-alive thread as a daemon
+threading.Thread(target=keep_alive_ping, daemon=True).start()
 
 if __name__ == "__main__":
     with app.app_context():
