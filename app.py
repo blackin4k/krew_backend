@@ -6,6 +6,7 @@
 # IMPORTS
 # -------------------------
 import eventlet
+import dns.resolver # Required for eventlet DNS fix
 eventlet.monkey_patch()
 
 import os
