@@ -3461,8 +3461,9 @@ def sync_r2_songs():
                 filename = os.path.basename(file_key)
                 current_files.add(filename)
                 
-                # Check if exists in DB
-                if Song.query.filter_by(audio_file=filename).first():
+                # Check if exists in DB (Case-insensitive check is safer)
+                exists = Song.query.filter(func.lower(Song.audio_file) == filename.lower()).first()
+                if exists:
                     continue
 
                 # Add to DB
@@ -3470,19 +3471,26 @@ def sync_r2_songs():
                 # Clean title
                 title = re.sub(r'\s*\[[\w-]+\]$', '', title).replace('_', ' ')
                 
-                song = Song(
-                    title=title,
-                    artist="Unknown (R2)",
-                    album="R2 Import",
-                    audio_file=filename,
-                    cover_file=None, # Covers need separate mapping or same-name assumption
-                    genre="Unknown",
-                    uploaded_by=None
-                )
-                db.session.add(song)
-                count += 1
-        
-        db.session.commit()
+                try:
+                    song = Song(
+                        title=title,
+                        artist="Unknown (R2)",
+                        album="R2 Import",
+                        audio_file=filename,
+                        cover_file=None,
+                        genre="Unknown",
+                        uploaded_by=None
+                    )
+                    db.session.add(song)
+                    db.session.commit() # Commit individually to isolate errors
+                    count += 1
+                    print(f"   -> Imported: {title}")
+                except IntegrityError:
+                    db.session.rollback()
+                    print(f"   ⚠️ Skipping duplicate (Integrity Error): {filename}")
+                except Exception as e:
+                    db.session.rollback()
+                    print(f"   ❌ Error importing {filename}: {e}")
         if count > 0:
             print(f"✅ R2 Sync complete. Imported {count} new songs.")
         else:
