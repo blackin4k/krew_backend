@@ -160,17 +160,33 @@ def player_next_top():
         if len(hist) > 50: hist.pop(0)
         state.history = json.dumps(hist)
 
-    next_id = queue.pop(0)
-    state.current_song_id = next_id
+    # -------------------------------------------------------
+    # LOOP TO SKIP DELETED/INVALID SONGS
+    # -------------------------------------------------------
+    next_id = None
+    song = None
     
+    while queue:
+        candidate_id = queue.pop(0)
+        song = Song.query.get(candidate_id)
+        if song:
+            next_id = candidate_id
+            break
+        # If song is None (deleted), loop continues and pops next
+    
+    # Save the updated queue (with deleted songs removed)
     if state.shuffle:
         state.shuffled_queue = json.dumps(queue)
     else:
         state.original_queue = json.dumps(queue)
 
+    if not next_id or not song:
+        db.session.commit()
+        return jsonify(error="Queue empty (valid songs)"), 400
+
+    state.current_song_id = next_id
     db.session.commit()
     
-    song = Song.query.get(next_id)
     return jsonify({
         "id": song.id,
         "title": song.title,
@@ -190,21 +206,37 @@ def player_prev_top():
         hist = json.loads(state.history or "[]")
     except: hist = []
     
-    if not hist:
-        if state.current_song_id:
-             song = Song.query.get(state.current_song_id)
-             return jsonify({
-                "id": song.id,
-                "title": song.title,
-                "artist": song.artist,
-                "cover": song.cover_file,
-                "audio": full_url(f"/audio/{song.audio_file}") if song.audio_file else None
-             })
-        return jsonify(error="No history"), 400
-
-    prev_id = hist.pop()
+    # -------------------------------------------------------
+    # LOOP BACKWARDS TO FIND VALID SONG
+    # -------------------------------------------------------
+    prev_id = None
+    song = None
+    
+    while hist:
+        candidate_id = hist.pop() # Pop from end (most recent)
+        song = Song.query.get(candidate_id)
+        if song:
+            prev_id = candidate_id
+            break
+        # If deleted, continue popping
+    
     state.history = json.dumps(hist)
 
+    if not prev_id or not song:
+        # No valid history left, verify current song still exists
+        if state.current_song_id:
+             current_song = Song.query.get(state.current_song_id)
+             if current_song:
+                 return jsonify({
+                    "id": current_song.id,
+                    "title": current_song.title,
+                    "artist": current_song.artist,
+                    "cover": current_song.cover_file,
+                    "audio": full_url(f"/audio/{current_song.audio_file}") if current_song.audio_file else None
+                 })
+        return jsonify(error="No history"), 400
+
+    # Found a valid previous song
     if state.current_song_id:
         try:
             queue = json.loads(state.shuffled_queue if state.shuffle else state.original_queue)
@@ -216,7 +248,6 @@ def player_prev_top():
     state.current_song_id = prev_id
     db.session.commit()
 
-    song = Song.query.get(prev_id)
     return jsonify({
         "id": song.id,
         "title": song.title,

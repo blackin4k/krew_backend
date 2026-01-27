@@ -19,7 +19,7 @@ def sync_songs():
 
     # 1. SYNC SONGS
     print("Syncing songs...")
-    local_cursor.execute("SELECT id, title, artist, album, audio_file, cover_file, uploaded_by, genre FROM song")
+    local_cursor.execute("SELECT id, title, artist, album, audio_file, cover_file, uploaded_by, genre, lyrics FROM song")
     songs = local_cursor.fetchall()
     print(f"Found {len(songs)} songs locally.")
 
@@ -27,7 +27,7 @@ def sync_songs():
     remote_cursor.execute("DELETE FROM song")
     
     insert_query = """
-        INSERT INTO song (id, title, artist, album, audio_file, cover_file, uploaded_by, genre)
+        INSERT INTO song (id, title, artist, album, audio_file, cover_file, uploaded_by, genre, lyrics)
         VALUES %s
     """
     execute_values(remote_cursor, insert_query, songs)
