@@ -1,0 +1,4 @@
+Internal Database URL = postgresql://krew_db_user:WXMteDgjBiceQO2On6GRDOXow3ZWaAIE@dpg-d5pb8aer433s73d713jg-a/krew_db
+Password = WXMteDgjBiceQO2On6GRDOXow3ZWaAIE
+External Database URL = postgresql://krew_db_user:WXMteDgjBiceQO2On6GRDOXow3ZWaAIE@dpg-d5pb8aer433s73d713jg-a.singapore-postgres.render.com/krew_db
+PSQL Command = PGPASSWORD=WXMteDgjBiceQO2On6GRDOXow3ZWaAIE psql -h dpg-d5pb8aer433s73d713jg-a.singapore-postgres.render.com -U krew_db_user krew_db

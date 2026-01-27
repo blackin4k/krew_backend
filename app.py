@@ -26,6 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from flask import Flask, request, jsonify, send_file, send_from_directory, redirect
 from flask import Response
 from flask_sqlalchemy import SQLAlchemy
+import difflib # For fuzzy search
 from flask_jwt_extended import (
     JWTManager, create_access_token,
     jwt_required, get_jwt_identity, verify_jwt_in_request
@@ -530,6 +531,7 @@ class Song(db.Model):
     cover_file = db.Column(db.String(255))
     uploaded_by = db.Column(db.Integer)
     genre = db.Column(db.String(50), default="Unknown")
+    lyrics = db.Column(db.Text, nullable=True)
 
 
 class ExternalPlaylistTrack(db.Model):
@@ -1124,13 +1126,28 @@ def search():
     query = Song.query
 
     if q:
-        query = query.filter(
-            or_(
-                Song.title.ilike(f"%{q}%"),
-                Song.artist.ilike(f"%{q}%"),
-                Song.album.ilike(f"%{q}%")
+        # SMART SEARCH: Tokenize and match ANY field (Title, Artist, Album, Lyrics)
+        # Split by space to get keywords
+        keywords = q.split()
+        
+        # Create a list of AND conditions
+        # For each keyword, it must be present in at least ONE of the fields
+        and_conditions = []
+        for keyword in keywords:
+            keyword_pattern = f"%{keyword}%"
+            and_conditions.append(
+                or_(
+                    Song.title.ilike(keyword_pattern),
+                    Song.artist.ilike(keyword_pattern),
+                    Song.album.ilike(keyword_pattern),
+                    Song.lyrics.ilike(keyword_pattern)
+                )
             )
-        )
+        
+        # Combine all keyword conditions with AND
+        # This means "taylor" AND "swift" must both match something
+        from sqlalchemy import and_
+        query = query.filter(and_(*and_conditions))
 
     if genre:
         query = query.filter_by(genre=genre)
@@ -1146,7 +1163,61 @@ def search():
     elif sort == "recent":
         query = query.order_by(Song.id.desc())
 
+    # Limit results - if smart search, we might get fewer but better matches
     results = query.limit(50).all()
+
+    # -- FUZZY SEARCH FALLBACK --
+    # If we have very few results and a query was provided, try to find close matches (typos)
+    if q and len(results) < 5:
+        # Get IDs of what we already found
+        existing_ids = {s.id for s in results}
+        
+        # Fetch all songs (lite query) to scan in Python
+        # Optimization: In a huge DB, we would use a vector DB or Trigram index (pg_trgm)
+        # But for Krew's current scale (SQLite/Postgres without extensions), this is fine.
+        all_songs = Song.query.all()
+        
+        fuzzy_matches = []
+        q_lower = q.lower()
+        
+        for song in all_songs:
+            if song.id in existing_ids:
+                continue
+                
+            # Calculate match ratio for Title and Artist
+            # IMPROVEMENT: Split target into words to handle "artic" vs "Arctic Monkeys"
+            # "artic" vs "Arctic Monkeys" -> Low score
+            # "artic" vs "Arctic" -> High score
+            
+            def get_best_token_ratio(query, target):
+                target_tokens = target.split()
+                if not target_tokens: return 0.0
+                # Compare query against the whole string
+                full_ratio = difflib.SequenceMatcher(None, query, target).ratio()
+                # Compare query against each word
+                token_ratios = [difflib.SequenceMatcher(None, query, t).ratio() for t in target_tokens]
+                return max(full_ratio, *token_ratios)
+
+            # Title match
+            title_score = get_best_token_ratio(q_lower, song.title.lower())
+            
+            # Artist match
+            artist_score = get_best_token_ratio(q_lower, song.artist.lower())
+            
+            # Take the best score
+            best_score = max(title_score, artist_score)
+            
+            # Threshold: 0.6 is usually good for "artic" -> "arctic"
+            if best_score > 0.6:
+                fuzzy_matches.append((best_score, song))
+                
+        # Sort by score descending
+        fuzzy_matches.sort(key=lambda x: x[0], reverse=True)
+        
+        # Add top 5 fuzzy matches
+        for score, song in fuzzy_matches[:5]:
+            results.append(song)
+            existing_ids.add(song.id)
 
     # -- RECOMMENDATION LOGIC --
     recommended_songs = []
@@ -1159,6 +1230,7 @@ def search():
             "artist": s.artist,
             "genre": s.genre,
             "cover": s.cover_file
+            # Note: We don't send lyrics in search results to keep payload light
         }
 
     if results:
@@ -1196,6 +1268,35 @@ def search():
         "results": [fmt_song(s) for s in results],
         "recommended": [fmt_song(s) for s in recommended_songs]
     })
+
+
+@app.route("/songs/<int:song_id>/lyrics", methods=["POST"])
+@jwt_required()
+def update_lyrics(song_id):
+    """Update lyrics for a song (crowdsourced from clients)"""
+    data = request.json or {}
+    lyrics = data.get("lyrics")
+    
+    if not lyrics:
+        return jsonify(error="lyrics required"), 400
+        
+    song = Song.query.get(song_id)
+    if not song:
+        return jsonify(error="Song not found"), 404
+        
+    # Only update if current lyrics are empty or significantly shorter
+    # This acts as a simple heuristic to prevent overwriting good lyrics with bad ones
+    current_len = len(song.lyrics) if song.lyrics else 0
+    new_len = len(lyrics)
+    
+    # If we have no lyrics, take them
+    # If new lyrics are longer (likely more complete), take them
+    if not song.lyrics or new_len > current_len:
+        song.lyrics = lyrics
+        db.session.commit()
+        return jsonify(msg="Lyrics updated")
+        
+    return jsonify(msg="Lyrics ignored (existing are better)")
 
 
 @app.route("/songs/<int:song_id>/stream")
@@ -3274,6 +3375,93 @@ def get_capsule_stats():
 
 
 # =========================================================
+# R2 SYNC (For Render)
+# =========================================================
+def sync_r2_songs():
+    """
+    Syncs songs from Cloudflare R2 bucket to the database.
+    Required Env Vars: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME
+    """
+    try:
+        import boto3
+        from botocore.config import Config
+    except ImportError:
+        print("⚠️ boto3 not installed. Skipping R2 sync.")
+        return
+
+    r2_account_id = os.environ.get("R2_ACCOUNT_ID")
+    r2_access_key = os.environ.get("R2_ACCESS_KEY_ID")
+    r2_secret_key = os.environ.get("R2_SECRET_ACCESS_KEY")
+    r2_bucket_name = os.environ.get("R2_BUCKET_NAME")
+
+    # If credentials are missing, we skip (it might be local dev)
+    if not all([r2_account_id, r2_access_key, r2_secret_key, r2_bucket_name]):
+        if os.environ.get("FLASK_ENV") == "production":
+            print("⚠️ R2 credentials missing in production. Skipping R2 sync.")
+        return
+
+    print(f"🔄 Starting R2 Sync from bucket: {r2_bucket_name}")
+
+    try:
+        s3 = boto3.client(
+            's3',
+            endpoint_url=f"https://{r2_account_id}.r2.cloudflarestorage.com",
+            aws_access_key_id=r2_access_key,
+            aws_secret_access_key=r2_secret_key,
+            config=Config(signature_version='s3v4')
+        )
+
+        # List objects in audio/ folder
+        paginator = s3.get_paginator('list_objects_v2')
+        pages = paginator.paginate(Bucket=r2_bucket_name, Prefix='audio/')
+
+        count = 0
+        current_files = set()
+
+        for page in pages:
+            if 'Contents' not in page:
+                continue
+            
+            for obj in page['Contents']:
+                file_key = obj['Key']
+                # file_key is "audio/filename.mp3"
+                if not file_key.lower().endswith('.mp3'):
+                    continue
+                
+                filename = os.path.basename(file_key)
+                current_files.add(filename)
+                
+                # Check if exists in DB
+                if Song.query.filter_by(audio_file=filename).first():
+                    continue
+
+                # Add to DB
+                title = os.path.splitext(filename)[0]
+                # Clean title
+                title = re.sub(r'\s*\[[\w-]+\]$', '', title).replace('_', ' ')
+                
+                song = Song(
+                    title=title,
+                    artist="Unknown (R2)",
+                    album="R2 Import",
+                    audio_file=filename,
+                    cover_file=None, # Covers need separate mapping or same-name assumption
+                    genre="Unknown",
+                    uploaded_by=None
+                )
+                db.session.add(song)
+                count += 1
+        
+        db.session.commit()
+        if count > 0:
+            print(f"✅ R2 Sync complete. Imported {count} new songs.")
+        else:
+             print("✅ R2 Sync complete. No new songs found.")
+
+    except Exception as e:
+        print(f"❌ R2 Sync Failed: {e}")
+
+# =========================================================
 # KEEP-ALIVE (FOR RENDER FREE TIER)
 # =========================================================
 
@@ -3304,6 +3492,12 @@ if __name__ == "__main__":
             auto_import_songs()
         except Exception as e:
             print(f"Auto-import failed: {e}")
+            
+        # Sync with R2 (Production)
+        try:
+            sync_r2_songs()
+        except Exception as e:
+            print(f"R2 Sync failed: {e}")
         # Auto-migration for cover_file
         try:
             from sqlalchemy import text
@@ -3328,4 +3522,17 @@ if __name__ == "__main__":
         except Exception:
             pass
 
+
     socketio.run(app, debug=True, host="0.0.0.0", port=5000)
+
+# =========================================================
+# PRODUCTION STARTUP (GUNICORN)
+# =========================================================
+else:
+    # This block runs when imported (e.g. by gunicorn)
+    with app.app_context():
+        try:
+            print("🚀 Gunicorn startup: Syncing R2...")
+            sync_r2_songs()
+        except Exception as e:
+            print(f"Startup Sync Error: {e}")
