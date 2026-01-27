@@ -3,11 +3,8 @@
 # =========================================================
 
 # -------------------------
-# IMPORTS
-# -------------------------
-import eventlet
-import dns.resolver # Required for eventlet DNS fix
-eventlet.monkey_patch()
+from gevent import monkey
+monkey.patch_all()
 
 import os
 import math
