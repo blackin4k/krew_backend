@@ -3439,7 +3439,8 @@ def sync_r2_songs():
             endpoint_url=f"https://{r2_account_id}.r2.cloudflarestorage.com",
             aws_access_key_id=r2_access_key,
             aws_secret_access_key=r2_secret_key,
-            config=Config(signature_version='s3v4')
+            config=Config(signature_version='s3v4'),
+            region_name="auto"  # Explicitly set region to auto
         )
 
         # List objects in audio/ folder
