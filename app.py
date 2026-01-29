@@ -3432,21 +3432,31 @@ def sync_r2_songs():
     print(f"🔄 Starting R2 Sync from bucket: {r2_bucket_name}")
 
     try:
-        s3 = boto3.client(
-            's3',
-            endpoint_url=f"https://{r2_account_id}.r2.cloudflarestorage.com",
-            aws_access_key_id=r2_access_key,
-            aws_secret_access_key=r2_secret_key,
-            config=Config(signature_version='s3v4'),
-            region_name="auto"  # Explicitly set region to auto
+        s3 = boto3.client('s3',
+            endpoint_url=app.config['R2_ENDPOINT_URL'],
+            aws_access_key_id=app.config['R2_ACCESS_KEY_ID'],
+            aws_secret_access_key=app.config['R2_SECRET_ACCESS_KEY'],
+            region_name="auto"
         )
-
-        # List objects in audio/ folder
+        
         paginator = s3.get_paginator('list_objects_v2')
-        pages = paginator.paginate(Bucket=r2_bucket_name, Prefix='audio/')
+        
+        # 1. Scan for Covers first (to match efficiently)
+        r2_covers = set()
+        print("🔄 Scanning R2 Covers...")
+        for page in paginator.paginate(Bucket=app.config['R2_BUCKET_NAME'], Prefix='covers/'):
+            if 'Contents' in page:
+                for obj in page['Contents']:
+                    if obj['Key'].lower().endswith(('.jpg', '.jpeg', '.png')):
+                        r2_covers.add(obj['Key'])
+        print(f"   -> Found {len(r2_covers)} covers.")
 
-        count = 0
+        # 2. Scan for Audio
+        print(f"🔄 Starting R2 Sync from bucket: {app.config['R2_BUCKET_NAME']}")
+        pages = paginator.paginate(Bucket=app.config['R2_BUCKET_NAME'], Prefix='audio/')
+        
         current_files = set()
+        count = 0
 
         for page in pages:
             if 'Contents' not in page:
@@ -3467,30 +3477,53 @@ def sync_r2_songs():
                     continue
 
                 # Add to DB
-                title = os.path.splitext(filename)[0]
-                # Clean title
-                title = re.sub(r'\s*\[[\w-]+\]$', '', title).replace('_', ' ')
+                # Parse filename: "Artist - Title.mp3"
+                basename_no_ext = os.path.splitext(filename)[0]
+                
+                # Robust parsing strategies
+                if ' - ' in basename_no_ext:
+                    parts = basename_no_ext.split(' - ', 1)
+                    artist = parts[0].strip()
+                    title = parts[1].strip()
+                elif '_-_' in basename_no_ext:
+                    parts = basename_no_ext.split('_-_', 1)
+                    artist = parts[0].replace('_', ' ').strip()
+                    title = parts[1].replace('_', ' ').strip()
+                else:
+                    artist = "Unknown" # Changed from (R2) to see if update applied
+                    title = basename_no_ext.replace('_', ' ')
+
+                # Clean title (remove [Official Video] etc if present)
+                title = re.sub(r'\s*\[.*?\]', '', title).strip()
+
+                # Check for cover match
+                # e.g. "audio/Artist - Title.mp3" tries to find "covers/Artist - Title.jpg"
+                cover_key = None
+                possible_cover_name = f"covers/{basename_no_ext}.jpg"
+                if possible_cover_name in r2_covers:
+                    cover_key = os.path.basename(possible_cover_name)
                 
                 try:
                     song = Song(
                         title=title,
-                        artist="Unknown (R2)",
+                        artist=artist,
                         album="R2 Import",
                         audio_file=filename,
-                        cover_file=None,
+                        cover_file=cover_key,
                         genre="Unknown",
                         uploaded_by=None
                     )
                     db.session.add(song)
                     db.session.commit() # Commit individually to isolate errors
                     count += 1
-                    print(f"   -> Imported: {title}")
+                    print(f"   -> Imported: {title} by {artist} (Cover: {'✅' if cover_key else '❌'})")
                 except IntegrityError:
                     db.session.rollback()
                     print(f"   ⚠️ Skipping duplicate (Integrity Error): {filename}")
                 except Exception as e:
                     db.session.rollback()
                     print(f"   ❌ Error importing {filename}: {e}")
+
         if count > 0:
             print(f"✅ R2 Sync complete. Imported {count} new songs.")
         else:
