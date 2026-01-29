@@ -3,8 +3,8 @@
 # =========================================================
 
 # -------------------------
-# from gevent import monkey
-# monkey.patch_all()
+from gevent import monkey
+monkey.patch_all()
 
 import os
 import math
@@ -886,7 +886,6 @@ def songs_by_genre(genre):
 
 
 @app.route("/songs", methods=["GET"])
-# @jwt_required() - REMOVED for Guest Mode (Read-Only)
 def get_songs():
     page = request.args.get("page", 1, type=int)
     limit = request.args.get("limit", 30, type=int)
