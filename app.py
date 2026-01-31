@@ -21,6 +21,9 @@ from flask_jwt_extended import decode_token
 from sqlalchemy import or_, func, case, desc
 import boto3 # Added for R2
 from sync_to_render import sync_songs # Added for Auto-Sync
+from dotenv import load_dotenv
+load_dotenv() # Load environment variables
+
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, TCON, APIC
 from mutagen.flac import FLAC
@@ -94,10 +97,10 @@ def allowed_file(filename, allowed_set):
            filename.rsplit('.', 1)[1].lower() in allowed_set
 
 # R2 Configuration
-R2_ENDPOINT_URL = "https://ced7d2775d362f5eee444f2ec74bd7fd.r2.cloudflarestorage.com"
-R2_ACCESS_KEY_ID = "0022f6249cf59fb8f55da24eea22cbd2"
-R2_SECRET_ACCESS_KEY = "a8b8964edaa3693bd66bc35fd2296510c55260c17acab030b6ffdbe49b375c28"
-R2_BUCKET_NAME = "krew-music"
+R2_ENDPOINT_URL = os.environ.get("R2_ENDPOINT_URL")
+R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID")
+R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY")
+R2_BUCKET_NAME = os.environ.get("R2_BUCKET_NAME", "krew-music")
 
 def extract_metadata(file_path):
     """
@@ -584,13 +587,18 @@ def full_url(path):
     return request.host_url.rstrip("/") + path
 
 # R2 Storage Configuration
-R2_PUBLIC_URL = os.environ.get("R2_PUBLIC_URL", "https://pub-5e22fa30a7744b769bea5ad23240ed75.r2.dev")
+# R2 Storage Configuration
+raw_r2_url = os.environ.get("R2_PUBLIC_URL", "https://pub-5e22fa30a7744b769bea5ad23240ed75.r2.dev")
+R2_PUBLIC_URL = raw_r2_url.strip().strip("'").strip('"').rstrip("/")
 
 def get_r2_cover_url(filename):
     if not filename:
         return None
     if filename.startswith("http"):
         return filename
+    # Fix double-pathing if DB already has "covers/"
+    if filename.startswith("covers/"):
+        return f"{R2_PUBLIC_URL}/{filename}"
     return f"{R2_PUBLIC_URL}/covers/{filename}"
 
 def get_r2_audio_url(filename):
@@ -598,6 +606,9 @@ def get_r2_audio_url(filename):
         return None
     if filename.startswith("http"):
         return filename
+    # Fix double-pathing if DB already has "audio/"
+    if filename.startswith("audio/"):
+        return f"{R2_PUBLIC_URL}/{filename}"
     return f"{R2_PUBLIC_URL}/audio/{filename}"
 
 def split_artists(artist_str):
@@ -3459,7 +3470,7 @@ def get_user_profile():
         "email": user.email
     })
 
-# 2. Get Recent
+
 @app.route("/me/recent")
 @jwt_required()
 def get_recent():
@@ -3496,10 +3507,7 @@ def get_recent():
 def get_capsule_stats():
     user_id = int(get_jwt_identity())
     
-    # Aggregations
-    
-    # Total minutes (Estimate 3 mins per song if duration missing, or use count)
-    # Since PlayLog.listen_duration is 0 by default, let's just count total plays
+
     total_plays = PlayLog.query.filter_by(user_id=user_id).count()
     total_minutes = total_plays * 3 # Rough estimate: 3 mins per song
     
@@ -3591,9 +3599,9 @@ def sync_r2_songs():
 
     try:
         s3 = boto3.client('s3',
-            endpoint_url=app.config['R2_ENDPOINT_URL'],
-            aws_access_key_id=app.config['R2_ACCESS_KEY_ID'],
-            aws_secret_access_key=app.config['R2_SECRET_ACCESS_KEY'],
+            endpoint_url=os.environ.get("R2_ENDPOINT_URL"),
+            aws_access_key_id=os.environ.get("R2_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.environ.get("R2_SECRET_ACCESS_KEY"),
             region_name="auto"
         )
         
