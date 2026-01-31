@@ -3610,7 +3610,7 @@ def sync_r2_songs():
         # 1. Scan for Covers first (to match efficiently)
         r2_covers = set()
         print("🔄 Scanning R2 Covers...")
-        for page in paginator.paginate(Bucket=app.config['R2_BUCKET_NAME'], Prefix='covers/'):
+        for page in paginator.paginate(Bucket=r2_bucket_name, Prefix='covers/'):
             if 'Contents' in page:
                 for obj in page['Contents']:
                     if obj['Key'].lower().endswith(('.jpg', '.jpeg', '.png')):
@@ -3618,8 +3618,8 @@ def sync_r2_songs():
         print(f"   -> Found {len(r2_covers)} covers.")
 
         # 2. Scan for Audio
-        print(f"🔄 Starting R2 Sync from bucket: {app.config['R2_BUCKET_NAME']}")
-        pages = paginator.paginate(Bucket=app.config['R2_BUCKET_NAME'], Prefix='audio/')
+        print(f"🔄 Starting R2 Sync from bucket: {r2_bucket_name}")
+        pages = paginator.paginate(Bucket=r2_bucket_name, Prefix='audio/')
         
         current_files = set()
         count = 0
