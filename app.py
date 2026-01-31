@@ -596,20 +596,33 @@ def get_r2_cover_url(filename):
         return None
     if filename.startswith("http"):
         return filename
-    # Fix double-pathing if DB already has "covers/"
+    
+    from urllib.parse import quote
+    
+    # Check if filename already includes "covers/" prefix
     if filename.startswith("covers/"):
-        return f"{R2_PUBLIC_URL}/{filename}"
-    return f"{R2_PUBLIC_URL}/covers/{filename}"
+        # split "covers/Artist - Title.jpg" -> "covers", "Artist - Title.jpg"
+        _, name = filename.split("/", 1)
+        safe_name = quote(name)
+        return f"{R2_PUBLIC_URL}/covers/{safe_name}"
+        
+    return f"{R2_PUBLIC_URL}/covers/{quote(filename)}"
 
 def get_r2_audio_url(filename):
     if not filename:
         return None
     if filename.startswith("http"):
         return filename
-    # Fix double-pathing if DB already has "audio/"
+    
+    from urllib.parse import quote
+    
+    # Check if filename already includes "audio/" prefix
     if filename.startswith("audio/"):
-        return f"{R2_PUBLIC_URL}/{filename}"
-    return f"{R2_PUBLIC_URL}/audio/{filename}"
+         _, name = filename.split("/", 1)
+         safe_name = quote(name)
+         return f"{R2_PUBLIC_URL}/audio/{safe_name}"
+         
+    return f"{R2_PUBLIC_URL}/audio/{quote(filename)}"
 
 def split_artists(artist_str):
     if not artist_str:
