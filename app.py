@@ -19,6 +19,12 @@ import hashlib
 from collections import defaultdict, Counter
 from flask_jwt_extended import decode_token
 from sqlalchemy import or_, func, case, desc
+import boto3 # Added for R2
+from sync_to_render import sync_songs # Added for Auto-Sync
+from mutagen.mp3 import MP3
+from mutagen.id3 import ID3, TIT2, TPE1, TALB, TCON, APIC
+from mutagen.flac import FLAC
+from mutagen.wave import WAVE
 
 from sqlalchemy.exc import IntegrityError
 from flask import Flask, request, jsonify, send_file, send_from_directory, redirect
@@ -74,6 +80,159 @@ app.config["UPLOAD_COVER"] = COVER_DIR
 @app.route("/ping_top")
 def ping_top():
     return jsonify(msg="pong_top")
+
+# =========================================================
+# ADMIN UPLOAD ROUTE
+# =========================================================
+from werkzeug.utils import secure_filename
+
+ALLOWED_EXTENSIONS_AUDIO = {'mp3', 'wav', 'flac', 'm4a', 'ogg'}
+ALLOWED_EXTENSIONS_COVER = {'png', 'jpg', 'jpeg', 'gif'}
+
+def allowed_file(filename, allowed_set):
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1].lower() in allowed_set
+
+# R2 Configuration
+R2_ENDPOINT_URL = "https://ced7d2775d362f5eee444f2ec74bd7fd.r2.cloudflarestorage.com"
+R2_ACCESS_KEY_ID = "0022f6249cf59fb8f55da24eea22cbd2"
+R2_SECRET_ACCESS_KEY = "a8b8964edaa3693bd66bc35fd2296510c55260c17acab030b6ffdbe49b375c28"
+R2_BUCKET_NAME = "krew-music"
+
+def extract_metadata(file_path):
+    """
+    Extracts title, artist, album, genre from audio file using mutagen.
+    Returns a dict with found values (None if missing).
+    """
+    meta = {"title": None, "artist": None, "album": None, "genre": None}
+    try:
+        if file_path.lower().endswith(".mp3"):
+            audio = MP3(file_path, ID3=ID3)
+            if audio.tags:
+                meta["title"] = str(audio.tags.get("TIT2")) if audio.tags.get("TIT2") else None
+                meta["artist"] = str(audio.tags.get("TPE1")) if audio.tags.get("TPE1") else None
+                meta["album"] = str(audio.tags.get("TALB")) if audio.tags.get("TALB") else None
+                meta["genre"] = str(audio.tags.get("TCON")) if audio.tags.get("TCON") else None
+        # Add FLAC/WAV support if needed here
+    except Exception as e:
+        print(f"⚠️ Metadata extraction failed: {e}")
+    return meta
+
+def upload_to_r2(local_path, r2_path):
+    try:
+        s3 = boto3.client(
+            's3',
+            endpoint_url=R2_ENDPOINT_URL,
+            aws_access_key_id=R2_ACCESS_KEY_ID,
+            aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+            region_name="auto"
+        )
+        s3.upload_file(local_path, R2_BUCKET_NAME, r2_path)
+        print(f"✅ Uploaded to R2: {r2_path}")
+        return True
+    except Exception as e:
+        print(f"❌ R2 Upload Failed: {e}")
+        return False
+
+@app.route("/admin/upload", methods=["POST"])
+def admin_upload_song():
+    # Simple Security Check (Replace "krew_admin_secret" with a real env var in prod)
+    admin_secret = request.headers.get("X-Admin-Secret")
+    if admin_secret != os.environ.get("ADMIN_SECRET", "krew_dev_admin_123"):
+        return jsonify(error="Unauthorized"), 401
+
+
+    if 'audio' not in request.files:
+        return jsonify(error="No audio file part"), 400
+    
+    file = request.files['audio']
+    cover = request.files.get('cover') # Optional
+
+    title = request.form.get('title')
+    artist = request.form.get('artist', 'Unknown Artist')
+    album = request.form.get('album', 'Unknown Album')
+    lyrics = request.form.get('lyrics', '')
+
+    if file.filename == '':
+        return jsonify(error="No selected file"), 400
+
+    if file and allowed_file(file.filename, ALLOWED_EXTENSIONS_AUDIO):
+        filename = secure_filename(file.filename)
+        # Ensure unique filename to prevent overwrites
+        unique_id = str(uuid.uuid4())[:8]
+        filename = f"{unique_id}_{filename}"
+        
+        file.save(os.path.join(app.config['UPLOAD_AUDIO'], filename))
+
+        cover_filename = None
+        if cover and allowed_file(cover.filename, ALLOWED_EXTENSIONS_COVER):
+            cover_fname = secure_filename(cover.filename)
+            cover_fname = f"{unique_id}_{cover_fname}"
+            cover.save(os.path.join(app.config['UPLOAD_COVER'], cover_fname))
+            cover_filename = cover_fname
+        
+        # Metadata Strategy:
+        # 1. Start with Form Data (User provided)
+        # 2. If missing, try Auto-Extraction from file
+        # 3. Fallback to Defaults
+        
+        extracted_meta = extract_metadata(os.path.join(app.config['UPLOAD_AUDIO'], filename))
+        
+        final_title = title if title else (extracted_meta["title"] if extracted_meta["title"] else os.path.splitext(request.files['audio'].filename)[0])
+        final_artist = artist if artist and artist != "Unknown Artist" else (extracted_meta["artist"] if extracted_meta["artist"] else "Unknown Artist")
+        final_album = album if album and album != "Unknown Album" else (extracted_meta["album"] if extracted_meta["album"] else "Unknown Album")
+        
+        # FIX: Respect form genre, fallback to extracted, default to "Unknown" (NOT "Uploaded")
+        form_genre = request.form.get('genre')
+        final_genre = form_genre if form_genre else (extracted_meta["genre"] if extracted_meta["genre"] else "Unknown")
+
+        # Create Song Record
+        new_song = Song(
+            title=final_title,
+            artist=final_artist,
+            album=final_album,
+            audio_file=filename,
+            cover_file=cover_filename,
+            genre=final_genre,
+            lyrics=lyrics,
+            uploaded_by=0 # 0 for Admin
+        )
+        
+        db.session.add(new_song)
+        db.session.commit()
+
+        # --- AUTO-SYNC TO PROD ---
+        print("🔄 Starting Auto-Sync to Production...")
+        
+        # 1. Upload Files to R2
+        audio_path = os.path.join(app.config['UPLOAD_AUDIO'], filename)
+        upload_to_r2(audio_path, f"audio/{filename}")
+        
+        if cover_filename:
+            cover_path = os.path.join(app.config['UPLOAD_COVER'], cover_filename)
+            upload_to_r2(cover_path, f"covers/{cover_filename}")
+
+        # 2. Sync Database to Render
+        try:
+            sync_songs()
+        except Exception as e:
+            print(f"❌ DB Sync Failed: {e}")
+            return jsonify({
+                "msg": "Song saved locally but Sync failed.", 
+                "error": str(e),
+                "song": {"id": new_song.id, "title": new_song.title}
+            }), 201
+
+        return jsonify({
+            "msg": "Song uploaded & Synced to Live App! 🚀", 
+            "song": {
+                "id": new_song.id,
+                "title": new_song.title,
+                "artist": new_song.artist
+            }
+        }), 201
+
+    return jsonify(error="Invalid file type"), 400
 
 # MOVED PLAYER ROUTES TO FIX NEXT/PREV
 @app.route("/player/play", methods=["POST"])
