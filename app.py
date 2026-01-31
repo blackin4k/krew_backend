@@ -102,6 +102,15 @@ R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID")
 R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY")
 R2_BUCKET_NAME = os.environ.get("R2_BUCKET_NAME", "krew-music")
 
+# Initialize Global S3 Client for Presigned URLs
+s3_client = boto3.client(
+    's3',
+    endpoint_url=R2_ENDPOINT_URL,
+    aws_access_key_id=R2_ACCESS_KEY_ID,
+    aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+    region_name="auto"
+)
+
 def extract_metadata(file_path):
     """
     Extracts title, artist, album, genre from audio file using mutagen.
@@ -123,14 +132,8 @@ def extract_metadata(file_path):
 
 def upload_to_r2(local_path, r2_path):
     try:
-        s3 = boto3.client(
-            's3',
-            endpoint_url=R2_ENDPOINT_URL,
-            aws_access_key_id=R2_ACCESS_KEY_ID,
-            aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-            region_name="auto"
-        )
-        s3.upload_file(local_path, R2_BUCKET_NAME, r2_path)
+        # Use global client
+        s3_client.upload_file(local_path, R2_BUCKET_NAME, r2_path)
         print(f"✅ Uploaded to R2: {r2_path}")
         return True
     except Exception as e:
@@ -591,64 +594,53 @@ def full_url(path):
 raw_r2_url = os.environ.get("R2_PUBLIC_URL", "https://pub-5e22fa30a7744b769bea5ad23240ed75.r2.dev")
 R2_PUBLIC_URL = raw_r2_url.strip().strip("'").strip('"').rstrip("/")
 
-def get_r2_cover_url(filename):
-    if not filename:
-        return None
-    if filename.startswith("http"):
-        return filename
-    
-    from urllib.parse import quote
-    
-    # Check if filename already includes "covers/" prefix
-    if filename.startswith("covers/"):
-        # split "covers/Artist - Title.jpg" -> "covers", "Artist - Title.jpg"
-        _, name = filename.split("/", 1)
-        safe_name = quote(name)
-        return f"{R2_PUBLIC_URL}/covers/{safe_name}"
-        
-    return f"{R2_PUBLIC_URL}/covers/{quote(filename)}"
+def get_presigned_url(filename, folder):
+    """
+    Generates a Presigned URL for R2 objects.
+    boto3 handles encoding and permissions automatically.
+    """
+    if not filename: return None
+    if filename.startswith("http"): return filename
 
-def get_r2_audio_url(filename):
-    if not filename:
-        return None
-    if filename.startswith("http"):
-        return filename
+    # Ensure key has correct folder prefix
+    # DB stores "Song.mp3", we need "audio/Song.mp3"
+    # But if DB already has "audio/Song.mp3", don't double it.
+    key = filename
+    if not key.startswith(f"{folder}/"):
+        key = f"{folder}/{filename}"
     
-    from urllib.parse import quote
-    
-    # Check if filename already includes "audio/" prefix
-    if filename.startswith("audio/"):
-         _, name = filename.split("/", 1)
-         safe_name = quote(name)
-         return f"{R2_PUBLIC_URL}/audio/{safe_name}"
-         
-    return f"{R2_PUBLIC_URL}/audio/{quote(filename)}"
+    try:
+        url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': R2_BUCKET_NAME, 'Key': key},
+            ExpiresIn=3600  # URL valid for 1 hour
+        )
+        return url
+    except Exception as e:
+        print(f"❌ Presigned URL Gen Failed for {key}: {e}")
+        # Fallback to public URL if presigning fails (e.g., credentials missing)
+        from urllib.parse import quote
+        safe_key = quote(key)
+        return f"{R2_PUBLIC_URL}/{safe_key}"
 
-def split_artists(artist_str):
-    if not artist_str:
-        return []
-    parts = (
-        artist_str
-        .replace("&", "/")
-        .replace(",", "/")
-        .replace("feat.", "/")
-        .replace("ft.", "/")
-        .split("/")
-    )
-    return [a.strip() for a in parts if a.strip()]
-
-@app.route("/covers/<filename>")
+@app.route("/covers/<path:filename>")
 def cover(filename):
     # Redirect to R2 for production, serve local for development
     if os.environ.get("FLASK_ENV") == "production":
-        return redirect(get_r2_cover_url(filename))
+        url = get_presigned_url(filename, "covers")
+        if url: return redirect(url)
+        return "Cover not found", 404
+        
     return send_file(os.path.join(COVER_DIR, filename))
 
 @app.route("/audio/<path:filename>")
 def serve_audio(filename):
     # Redirect to R2 for production, serve local for development
     if os.environ.get("FLASK_ENV") == "production":
-        return redirect(get_r2_audio_url(filename))
+        url = get_presigned_url(filename, "audio")
+        if url: return redirect(url)
+        return "Audio not found", 404
+        
     return send_from_directory(AUDIO_DIR, filename)
 from werkzeug.exceptions import HTTPException
 
