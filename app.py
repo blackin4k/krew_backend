@@ -1063,49 +1063,75 @@ def songs_by_genre(genre):
 
 @app.route("/artists", methods=["GET"])
 def get_artists():
+    # Frontend expects a list of STRINGS (names)
     artists = Artist.query.order_by(Artist.name.asc()).all()
-    # If no artists found (and population script ran), it means something else is wrong.
-    # But for now, return what we have.
-    return jsonify([
-        {
-            "id": a.id,
-            "name": a.name,
-            "bio": a.bio,
-            "image": a.image_url
-        }
-        for a in artists
-    ])
+    # If explicit artist table is empty, fallback to distinct songs?
+    # But we populated it.
+    
+    return jsonify([a.name for a in artists])
 
 @app.route("/artists/<path:name>", methods=["GET"])
 def get_artist_details(name):
     # Case insensitive search
-    artist = Artist.query.filter(func.lower(Artist.name) == func.lower(name)).first()
-    
-    # If not found in Artist table, try to find in Songs to support "Unknown" or un-synced artists
-    # But populate_artists.py should have fixed this.
-    
+    # Frontend expects:
+    # {
+    #   "artist": "Name",
+    #   "albums": [{ "album": "Name", "cover": "url" }],
+    #   "top_tracks": [ ...songs... ]
+    # }
+
+    # 1. Fetch Songs first
     songs = Song.query.filter(func.lower(Song.artist) == func.lower(name)).all()
     
-    if not artist and not songs:
-        return jsonify(error="Artist not found"), 404
+    if not songs:
+        # Check if artist exists in Artist table but has no songs?
+        artist_entry = Artist.query.filter(func.lower(Artist.name) == func.lower(name)).first()
+        if not artist_entry:
+             return jsonify(error="Artist not found"), 404
+        # If artist exists but no songs, return empty structure
+        return jsonify({
+            "artist": artist_entry.name,
+            "albums": [],
+            "top_tracks": []
+        })
+
+    # 2. Process Albums
+    albums_map = {}
+    for s in songs:
+        alb_name = s.album or "Unknown Album"
+        if alb_name not in albums_map:
+            albums_map[alb_name] = s.cover_file # Pick first cover found for album
+
+    albums_list = [
+        {
+            "album": title, 
+            "cover": full_url(f"/covers/{cover}") if cover else None
+        }
+        for title, cover in albums_map.items()
+    ]
+
+    # 3. Format Songs (Top Tracks)
+    # Return all songs for now as "top tracks"
+    tracks_list = [
+        {
+            "id": s.id,
+            "title": s.title,
+            "artist": s.artist,
+            "album": s.album,
+            "cover": s.cover_file, # Frontend handles "cover" or "cover_file"? 
+            # Looking at SongCard.tsx might be needed, but app.py usually sends "cover" for cover_file field in other endpoints.
+            # let's map s.cover_file to "cover" to be safe and consistent with other endpoints.
+            "cover": s.cover_file,
+            "url": full_url(f"/audio/{s.audio_file}") if s.audio_file else None,
+            "genre": s.genre
+        }
+        for s in songs
+    ]
 
     return jsonify({
-        "artist": {
-            "id": artist.id if artist else 0,
-            "name": artist.name if artist else name,
-            "bio": artist.bio if artist else "",
-            "image": artist.image_url if artist else None
-        },
-        "songs": [
-            {
-                "id": s.id,
-                "title": s.title,
-                "artist": s.artist,
-                "cover": s.cover_file,
-                "genre": s.genre
-            }
-            for s in songs
-        ]
+        "artist": songs[0].artist, # Use the casing from DB
+        "albums": albums_list,
+        "top_tracks": tracks_list
     })
 
 
