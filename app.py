@@ -3645,6 +3645,20 @@ def sync_r2_songs():
                 # Check if exists in DB (Case-insensitive check is safer)
                 exists = Song.query.filter(func.lower(Song.audio_file) == filename.lower()).first()
                 if exists:
+                    # SELF-HEALING: Check if cover is missing and try to fix it
+                    if not exists.cover_file:
+                        basename_no_ext = os.path.splitext(filename)[0]
+                        cover_key = None
+                        for ext in ['.jpg', '.jpeg', '.png']:
+                            possible_cover_name = f"covers/{basename_no_ext}{ext}"
+                            if possible_cover_name in r2_covers:
+                                cover_key = os.path.basename(possible_cover_name)
+                                break
+                        
+                        if cover_key:
+                            print(f"   🩹 Healing missing cover for: {exists.title} -> Found {cover_key}")
+                            exists.cover_file = cover_key
+                            db.session.commit()
                     continue
 
                 # Add to DB
