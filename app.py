@@ -1061,6 +1061,53 @@ def songs_by_genre(genre):
         for s in songs
     ])
 
+@app.route("/artists", methods=["GET"])
+def get_artists():
+    artists = Artist.query.order_by(Artist.name.asc()).all()
+    # If no artists found (and population script ran), it means something else is wrong.
+    # But for now, return what we have.
+    return jsonify([
+        {
+            "id": a.id,
+            "name": a.name,
+            "bio": a.bio,
+            "image": a.image_url
+        }
+        for a in artists
+    ])
+
+@app.route("/artists/<path:name>", methods=["GET"])
+def get_artist_details(name):
+    # Case insensitive search
+    artist = Artist.query.filter(func.lower(Artist.name) == func.lower(name)).first()
+    
+    # If not found in Artist table, try to find in Songs to support "Unknown" or un-synced artists
+    # But populate_artists.py should have fixed this.
+    
+    songs = Song.query.filter(func.lower(Song.artist) == func.lower(name)).all()
+    
+    if not artist and not songs:
+        return jsonify(error="Artist not found"), 404
+
+    return jsonify({
+        "artist": {
+            "id": artist.id if artist else 0,
+            "name": artist.name if artist else name,
+            "bio": artist.bio if artist else "",
+            "image": artist.image_url if artist else None
+        },
+        "songs": [
+            {
+                "id": s.id,
+                "title": s.title,
+                "artist": s.artist,
+                "cover": s.cover_file,
+                "genre": s.genre
+            }
+            for s in songs
+        ]
+    })
+
 
 @app.route("/songs", methods=["GET"])
 def get_songs():
