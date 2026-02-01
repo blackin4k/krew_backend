@@ -3647,15 +3647,27 @@ def sync_r2_songs():
                 # Check if exists in DB (Case-insensitive check is safer)
                 exists = Song.query.filter(func.lower(Song.audio_file) == filename.lower()).first()
                 if exists:
-                    # SELF-HEALING: Check if cover is missing and try to fix it
                     if not exists.cover_file:
                         basename_no_ext = os.path.splitext(filename)[0]
                         cover_key = None
-                        for ext in ['.jpg', '.jpeg', '.png']:
-                            possible_cover_name = f"covers/{basename_no_ext}{ext}"
-                            if possible_cover_name in r2_covers:
-                                cover_key = os.path.basename(possible_cover_name)
-                                break
+                        search_bases = [
+                            basename_no_ext,
+                            basename_no_ext.replace(" ", "_"),
+                            basename_no_ext.replace(" ", "-"),
+                        ]
+                        
+                        for base in search_bases:
+                            for ext in ['.jpg', '.jpeg', '.png', '.webp']:
+                                candidates = [
+                                    f"covers/{base}{ext}",
+                                    f"covers/{base}_cover{ext}",
+                                ]
+                                for cand in candidates:
+                                    if cand in r2_covers:
+                                        cover_key = os.path.basename(cand)
+                                        break
+                                if cover_key: break
+                            if cover_key: break
                         
                         if cover_key:
                             print(f"   🩹 Healing missing cover for: {exists.title} -> Found {cover_key}")
@@ -3686,11 +3698,24 @@ def sync_r2_songs():
                 # Check for cover match
                 # e.g. "audio/Artist - Title.mp3" tries to find "covers/Artist - Title.jpg/png/jpeg"
                 cover_key = None
-                for ext in ['.jpg', '.jpeg', '.png']:
-                    possible_cover_name = f"covers/{basename_no_ext}{ext}"
-                    if possible_cover_name in r2_covers:
-                        cover_key = os.path.basename(possible_cover_name)
-                        break
+                search_bases = [
+                    basename_no_ext,
+                    basename_no_ext.replace(" ", "_"),
+                    basename_no_ext.replace(" ", "-"),
+                ]
+                
+                for base in search_bases:
+                    for ext in ['.jpg', '.jpeg', '.png', '.webp']:
+                        candidates = [
+                            f"covers/{base}{ext}",
+                            f"covers/{base}_cover{ext}",
+                        ]
+                        for cand in candidates:
+                            if cand in r2_covers:
+                                cover_key = os.path.basename(cand)
+                                break
+                        if cover_key: break
+                    if cover_key: break
                 
                 try:
                     song = Song(
