@@ -625,23 +625,23 @@ def get_presigned_url(filename, folder):
 
 @app.route("/covers/<path:filename>")
 def cover(filename):
-    # Redirect to R2 for production, serve local for development
-    if os.environ.get("FLASK_ENV") == "production":
-        print(f"🔍 DEBUG: Requesting cover: {filename}")
-        url = get_presigned_url(filename, "covers")
-        print(f"🔗 DEBUG: Generated URL: {url[:100]}..." if url else "🔗 DEBUG: Generated URL: None")
-        if url: return redirect(url)
-        return "Cover not found", 404
-        
+    # Always redirect to R2 for performance (Direct Cloud Download)
+    # This bypasses the slow Render free tier proxy
+    print(f"🔍 Requesting cover: {filename}")
+    url = get_presigned_url(filename, "covers")
+    if url: 
+        return redirect(url)
+    
+    # Fallback only if R2 fails
     return send_file(os.path.join(COVER_DIR, filename))
 
 @app.route("/audio/<path:filename>")
 def serve_audio(filename):
-    # Redirect to R2 for production, serve local for development
-    if os.environ.get("FLASK_ENV") == "production":
-        url = get_presigned_url(filename, "audio")
-        if url: return redirect(url)
-        return "Audio not found", 404
+    # Always redirect to R2 for performance (Direct Cloud Download)
+    # This bypasses the slow Render free tier proxy
+    url = get_presigned_url(filename, "audio")
+    if url: 
+        return redirect(url)
         
     return send_from_directory(AUDIO_DIR, filename)
 from werkzeug.exceptions import HTTPException

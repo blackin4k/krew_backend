@@ -1,0 +1,37 @@
+THE ISSUES WE HAVE ON KREW THAT WE NEED TO FIX 
+
+BACKEND:
+        HIGH  PROIRITY: 
+            >the audio is cracking on high bass songs (from what ive expericed) 
+                
+                *eg songs like :
+                                slow dancing in the dark - joji
+            
+            >users complain the app logs out every day even tho we set it to 7 days 
+
+            >the cover images dont load when they start the app 
+
+            >the jam dosent work 
+        
+        USER STATISFACTION :
+                the search is very ass:
+
+                how i want it to be :
+                    imagine a drunk guy typing song and we still get it very close 
+
+                right now we use render free tier for backend maybe that is causing the app to not load the cover images and it looks very backend
+
+
+                we have a many songs with no cover image no artist name ist just "unknown" i dont if its in the data base or cloudfare r2 
+
+
+
+
+
+
+what i seee as the dev (note i lsited all the problems togther frontedn backend)
+
+after some songs the app crashes on my phone i nevre got this issue form any user prolly cuz they didnt play it much too face this issue and maybe its cause im on android 12 
+
+what i think is this prolly a memory leak issue
+

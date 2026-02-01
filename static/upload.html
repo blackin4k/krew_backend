@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Krew Admin - Upload Music</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            background-color: #000;
+            color: #fff;
+            font-family: sans-serif;
+        }
+
+        .input-group {
+            margin-bottom: 1rem;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            color: #888;
+        }
+
+        input[type="text"],
+        input[type="file"],
+        textarea {
+            width: 100%;
+            padding: 0.75rem;
+            border-radius: 0.5rem;
+            background: #111;
+            border: 1px solid #333;
+            color: white;
+        }
+
+        button {
+            background: white;
+            color: black;
+            padding: 1rem 2rem;
+            border-radius: 999px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        button:hover {
+            opacity: 0.9;
+            transform: scale(1.02);
+        }
+    </style>
+</head>
+
+<body class="min-h-screen flex items-center justify-center p-6">
+
+    <div class="w-full max-w-lg">
+        <h1 class="text-4xl font-bold mb-8 tracking-tighter">Upload Music</h1>
+
+        <form id="uploadForm" class="space-y-6">
+
+            <div class="input-group">
+                <label>MP3 File *</label>
+                <input type="file" name="audio" accept=".mp3,.wav,.m4a" required>
+            </div>
+
+            <div class="input-group">
+                <label>Cover Art</label>
+                <input type="file" name="cover" accept="image/*">
+            </div>
+
+            <div class="grid grid-cols-2 gap-4">
+                <div class="input-group">
+                    <label>Title</label>
+                    <input type="text" name="title" placeholder="Song Name">
+                </div>
+                <div class="input-group">
+                    <label>Artist</label>
+                    <input type="text" name="artist" placeholder="Artist Name">
+                </div>
+            </div>
+
+            <div class="input-group">
+                <label>Album</label>
+                <input type="text" name="album" placeholder="Album / Single">
+            </div>
+
+            <div class="input-group">
+                <label>Admin Secret</label>
+                <input type="password" id="secret" value="krew_dev_admin_123" placeholder="Enter Secret Key">
+            </div>
+
+            <button type="submit" id="submitBtn">Upload to Krew</button>
+
+            <div id="status" class="mt-4 text-center text-sm opacity-50"></div>
+        </form>
+    </div>
+
+    <script>
+        const form = document.getElementById('uploadForm');
+        const status = document.getElementById('status');
+        const btn = document.getElementById('submitBtn');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            btn.disabled = true;
+            btn.innerText = 'Uploading...';
+            status.innerText = '';
+            status.className = 'mt-4 text-center text-sm opacity-50';
+
+            const formData = new FormData(form);
+            const secret = document.getElementById('secret').value;
+
+            try {
+                const res = await fetch('/admin/upload', {
+                    method: 'POST',
+                    headers: {
+                        'X-Admin-Secret': secret
+                    },
+                    body: formData
+                });
+
+                const data = await res.json();
+
+                if (res.ok) {
+                    status.innerText = '✅ ' + data.msg + ' (ID: ' + data.song.id + ')';
+                    status.className = 'mt-4 text-center text-sm text-green-500';
+                    form.reset();
+                } else {
+                    status.innerText = '❌ ' + (data.error || 'Upload failed');
+                    status.className = 'mt-4 text-center text-sm text-red-500';
+                }
+            } catch (err) {
+                status.innerText = '❌ Network Error';
+            }
+
+            btn.disabled = false;
+            btn.innerText = 'Upload to Krew';
+        });
+    </script>
+
+</body>
+
+</html>

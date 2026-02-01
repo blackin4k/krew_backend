@@ -24,14 +24,23 @@ def sync_songs():
     print(f"Found {len(songs)} songs locally.")
 
     # Clear existing songs in remote (optional, but safer for clean sync)
-    remote_cursor.execute("DELETE FROM song")
+    # remote_cursor.execute("DELETE FROM song") <-- CAUSES FOREIGN KEY ERROR
     
     insert_query = """
         INSERT INTO song (id, title, artist, album, audio_file, cover_file, uploaded_by, genre, lyrics)
         VALUES %s
+        ON CONFLICT (id) DO UPDATE SET
+            title = EXCLUDED.title,
+            artist = EXCLUDED.artist,
+            album = EXCLUDED.album,
+            audio_file = EXCLUDED.audio_file,
+            cover_file = EXCLUDED.cover_file,
+            uploaded_by = EXCLUDED.uploaded_by,
+            genre = EXCLUDED.genre,
+            lyrics = EXCLUDED.lyrics;
     """
     execute_values(remote_cursor, insert_query, songs)
-    print("✅ Songs synced!")
+    print("✅ Songs synced (UPSERT Mode)!")
 
     # 2. SYNC ARTISTS
     print("Syncing artists...")
