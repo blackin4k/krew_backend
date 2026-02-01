@@ -1111,25 +1111,24 @@ def get_artist_details(name):
     ]
 
     # 3. Format Songs (Top Tracks)
-    # Return all songs for now as "top tracks"
     tracks_list = [
         {
             "id": s.id,
-            "title": s.title,
-            "artist": s.artist,
-            "album": s.album,
-            "cover": s.cover_file, # Frontend handles "cover" or "cover_file"? 
-            # Looking at SongCard.tsx might be needed, but app.py usually sends "cover" for cover_file field in other endpoints.
-            # let's map s.cover_file to "cover" to be safe and consistent with other endpoints.
-            "cover": s.cover_file,
+            "title": s.title or "Unknown Title",
+            "artist": s.artist or "Unknown Artist",
+            "album": s.album or "", 
+            "cover": s.cover_file or "", # GUARANTEE STRING
             "url": full_url(f"/audio/{s.audio_file}") if s.audio_file else None,
-            "genre": s.genre
+            "genre": s.genre or ""
         }
         for s in songs
     ]
 
+    # Safe artist name
+    artist_name = songs[0].artist if (songs and songs[0].artist) else name
+
     return jsonify({
-        "artist": songs[0].artist, # Use the casing from DB
+        "artist": artist_name, 
         "albums": albums_list,
         "top_tracks": tracks_list
     })
