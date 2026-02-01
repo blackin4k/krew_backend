@@ -627,7 +627,9 @@ def get_presigned_url(filename, folder):
 def cover(filename):
     # Redirect to R2 for production, serve local for development
     if os.environ.get("FLASK_ENV") == "production":
+        print(f"🔍 DEBUG: Requesting cover: {filename}")
         url = get_presigned_url(filename, "covers")
+        print(f"🔗 DEBUG: Generated URL: {url[:100]}..." if url else "🔗 DEBUG: Generated URL: None")
         if url: return redirect(url)
         return "Cover not found", 404
         
