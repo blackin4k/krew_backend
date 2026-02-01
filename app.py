@@ -3668,11 +3668,13 @@ def sync_r2_songs():
                 title = re.sub(r'\s*\[.*?\]', '', title).strip()
 
                 # Check for cover match
-                # e.g. "audio/Artist - Title.mp3" tries to find "covers/Artist - Title.jpg"
+                # e.g. "audio/Artist - Title.mp3" tries to find "covers/Artist - Title.jpg/png/jpeg"
                 cover_key = None
-                possible_cover_name = f"covers/{basename_no_ext}.jpg"
-                if possible_cover_name in r2_covers:
-                    cover_key = os.path.basename(possible_cover_name)
+                for ext in ['.jpg', '.jpeg', '.png']:
+                    possible_cover_name = f"covers/{basename_no_ext}{ext}"
+                    if possible_cover_name in r2_covers:
+                        cover_key = os.path.basename(possible_cover_name)
+                        break
                 
                 try:
                     song = Song(
