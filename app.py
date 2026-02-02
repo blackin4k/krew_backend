@@ -2506,20 +2506,28 @@ def autoplay_fill(state):
     if state.current_song_id:
         existing_ids.add(state.current_song_id)
     
-    # 1. Try: Same Artist + Random
+    # 1. Try: Similar Artist (Smart Match)
+    # Split "Pritam, Arijit Singh" -> ["Pritam", "Arijit Singh"]
+    import re
+    artists = [a.strip() for a in re.split(r'[,&]|\sfeat\.|\sft\.', last_song.artist, flags=re.IGNORECASE) if a.strip()]
+    
+    # Create fuzzy filters for each artist part
+    artist_filters = [Song.artist.ilike(f"%{a}%") for a in artists]
+    
     related = (
         Song.query
-        .filter(
-            Song.artist == last_song.artist,
-            Song.id.notin_(existing_ids)
-        )
+        .filter(or_(*artist_filters))
+        .filter(Song.id.notin_(existing_ids))
         .order_by(func.random())
         .limit(5)
         .all()
     )
 
     # 2. Try: Same Genre + Random (if artist exhausted)
-    if len(related) < 5:
+    # Only if genre is meaningful (not Unknown/Import)
+    valid_genre = last_song.genre and last_song.genre.lower() not in ['unknown', 'import', 'other', 'single', 'undefined']
+    
+    if len(related) < 5 and valid_genre:
         genre_songs = (
             Song.query
             .filter(
@@ -3843,6 +3851,51 @@ def keep_alive_ping():
 
 # Start the keep-alive thread as a daemon
 threading.Thread(target=keep_alive_ping, daemon=True).start()
+
+
+# =========================================================
+# STATS & ANALYTICS (NEW)
+# =========================================================
+
+@app.route("/stats/global", methods=["GET"])
+def global_stats():
+    """Get most played songs platform-wide"""
+    limit = int(request.args.get("limit", 20))
+    
+    results = (
+        db.session.query(Song, func.count(PlayLog.id).label("plays"))
+        .join(PlayLog, PlayLog.song_id == Song.id)
+        .group_by(Song.id)
+        .order_by(desc("plays"))
+        .limit(limit)
+        .all()
+    )
+    
+    return jsonify([
+        {
+            "id": s.id,
+            "title": s.title,
+            "artist": s.artist,
+            "cover": full_url(f"/covers/{s.cover_file}") if s.cover_file else None,
+            "plays": plays
+        }
+        for s, plays in results
+    ])
+
+@app.route("/stats/song/<int:song_id>", methods=["GET"])
+def song_stats(song_id):
+    """Get specific stats for one song"""
+    song = Song.query.get_or_404(song_id)
+    
+    total_plays = PlayLog.query.filter_by(song_id=song_id).count()
+    unique_listeners = db.session.query(func.count(func.distinct(PlayLog.user_id))).filter_by(song_id=song_id).scalar()
+    
+    return jsonify({
+        "id": song.id,
+        "title": song.title,
+        "plays": total_plays,
+        "unique_listeners": unique_listeners
+    })
 
 if __name__ == "__main__":
     with app.app_context():

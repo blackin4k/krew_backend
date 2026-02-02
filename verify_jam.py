@@ -75,6 +75,36 @@ def test_jam_sync():
 
         # Listener joins jam
         print("🎧 Listener joining jam...")
+        # Assuming stream_url is obtained from a previous step or is a known value for testing
+        # For this test, let's mock a stream_url or assume it's part of the jam state
+        # In a real scenario, this would likely come from a 'jam:joined' event or similar.
+        stream_url = f"{BASE_URL}/stream/{jam_id}/song_id_1" # Placeholder for demonstration
+        print(f"   Using stream URL: {stream_url}")
+    
+        try:
+            # Check if stream URL is valid (Redirects to R2?)
+            r = requests.get(stream_url, allow_redirects=False)
+            print(f"   Stream Endpoint Status: {r.status_code}")
+            
+            real_url = stream_url
+            if r.status_code == 302:
+                real_url = r.headers['Location']
+                print(f"   -> Redirects to: {real_url[:100]}...")
+                
+                # Verify R2 Reachability
+                r2_head = requests.head(real_url)
+                print(f"   -> R2 Object Status: {r2_head.status_code}")
+                if r2_head.status_code != 200:
+                     print("   ❌ R2 Object Unreachable (Check CORS or Permissions)")
+                else:
+                     print(f"   ✅ R2 Object Reachable (Type: {r2_head.headers.get('Content-Type')})")
+
+            else:
+                 print("   ⚠️ No Redirect? (Proxying or Error)")
+
+        except Exception as e:
+            print(f"   ❌ Stream Check Failed: {e}")
+        
         listener_client.emit("jam:join", {"jam_id": jam_id, "token": listener_token})
         time.sleep(1)
 
