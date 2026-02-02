@@ -625,23 +625,26 @@ def get_presigned_url(filename, folder):
 
 @app.route("/covers/<path:filename>")
 def cover(filename):
-    # Always redirect to R2 for performance (Direct Cloud Download)
-    # This bypasses the slow Render free tier proxy
-    print(f"🔍 Requesting cover: {filename}")
+    # Redirect to R2 + Cache the Redirect!
+    # This prevents the app from hitting the backend for every scroll.
+    # Cache for 3000s (50 mins) to be safe within the 3600s URL expiry.
     url = get_presigned_url(filename, "covers")
     if url: 
-        return redirect(url)
+        resp = redirect(url)
+        resp.headers['Cache-Control'] = 'public, max-age=3000'
+        return resp
     
-    # Fallback only if R2 fails
+    # Fallback
     return send_file(os.path.join(COVER_DIR, filename))
 
 @app.route("/audio/<path:filename>")
 def serve_audio(filename):
-    # Always redirect to R2 for performance (Direct Cloud Download)
-    # This bypasses the slow Render free tier proxy
+    # Redirect to R2 + Cache
     url = get_presigned_url(filename, "audio")
     if url: 
-        return redirect(url)
+        resp = redirect(url)
+        resp.headers['Cache-Control'] = 'public, max-age=3000'
+        return resp
         
     return send_from_directory(AUDIO_DIR, filename)
 from werkzeug.exceptions import HTTPException
