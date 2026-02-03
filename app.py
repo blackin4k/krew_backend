@@ -74,7 +74,18 @@ else:
     app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{os.path.join(INSTANCE_DIR, 'db.sqlite3')}"
 
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", "dev-secret")
+
+# SECURITY: JWT secret must come from environment in production
+# Only allow auto-generated secret in development
+jwt_secret = os.environ.get("JWT_SECRET_KEY")
+if not jwt_secret:
+    if os.environ.get("FLASK_ENV") == "production" or os.environ.get("RENDER"):
+        raise RuntimeError("CRITICAL: JWT_SECRET_KEY must be set in production!")
+    # Dev only: generate a random secret (tokens won't persist across restarts)
+    import secrets
+    jwt_secret = secrets.token_hex(32)
+    print("⚠️  DEV MODE: Using auto-generated JWT secret (tokens won't persist)")
+app.config["JWT_SECRET_KEY"] = jwt_secret
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = 604800  # 7 days in seconds
 
 app.config["UPLOAD_AUDIO"] = AUDIO_DIR
@@ -752,7 +763,7 @@ class Song(db.Model):
     audio_file = db.Column(db.String(255))
     cover_file = db.Column(db.String(255))
     uploaded_by = db.Column(db.Integer)
-    genre = db.Column(db.String(50), default="Unknown")
+    genre = db.Column(db.String(50), default="Unknown", index=True)
     lyrics = db.Column(db.Text, nullable=True)
 
 
@@ -836,10 +847,10 @@ class PlayLog(db.Model):
     __tablename__ = "play_logs"
 
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    song_id = db.Column(db.Integer, db.ForeignKey("song.id"), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    song_id = db.Column(db.Integer, db.ForeignKey("song.id"), nullable=False, index=True)
 
-    played_at = db.Column(db.DateTime, default=datetime.utcnow)
+    played_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     listen_duration = db.Column(db.Integer, default=0)  # seconds
     completed = db.Column(db.Boolean, default=False)
 
@@ -2844,7 +2855,7 @@ def because_you_listened(sid):
 
 # In-memory jam state
 # Changed: introduce jam_state as the single source of truth for Jam playback
-jam_state = {}          # { jam_id: { song_id, started_at, paused, position } }
+jam_state = {}          # { jam_id: { song_id, started_at, paused, position, last_activity } }
 jam_listeners = {}      # { jam_id: { user_id: username } }
 jam_skip_votes = {}     # { jam_id: set(user_ids) }
 jam_hosts = {}          # { jam_id: host_user_id }
@@ -2853,6 +2864,43 @@ jam_hosts = {}          # { jam_id: host_user_id }
 import threading
 jam_lock = threading.RLock()
 jam_sockets = {}        # { sid: { jam_id, user_id } }
+
+# MEMORY LEAK PREVENTION: Clean up inactive jam sessions
+JAM_INACTIVE_TIMEOUT = 7200  # 2 hours in seconds
+
+def cleanup_inactive_jams():
+    """Remove jam sessions that have been inactive for JAM_INACTIVE_TIMEOUT seconds."""
+    now = time.time()
+    with jam_lock:
+        inactive_jams = []
+        for jam_id, state in jam_state.items():
+            last_activity = state.get("last_activity", 0)
+            if now - last_activity > JAM_INACTIVE_TIMEOUT:
+                inactive_jams.append(jam_id)
+        
+        for jam_id in inactive_jams:
+            jam_state.pop(jam_id, None)
+            jam_listeners.pop(jam_id, None)
+            jam_skip_votes.pop(jam_id, None)
+            jam_hosts.pop(jam_id, None)
+            print(f"🧹 Cleaned up inactive jam: {jam_id}")
+        
+        if inactive_jams:
+            print(f"🧹 Cleaned up {len(inactive_jams)} inactive jams. Active: {len(jam_state)}")
+
+# Schedule periodic cleanup (runs every 30 minutes)
+def start_jam_cleanup_scheduler():
+    def run_cleanup():
+        while True:
+            time.sleep(1800)  # 30 minutes
+            cleanup_inactive_jams()
+    
+    cleanup_thread = threading.Thread(target=run_cleanup, daemon=True)
+    cleanup_thread.start()
+    print("🧹 Jam cleanup scheduler started")
+
+# Start cleanup on app load
+start_jam_cleanup_scheduler()
 
 
 
@@ -2912,7 +2960,8 @@ def jam_join(data):
             "song_id": None,
             "started_at": None,
             "paused": True,
-            "position": 0
+            "position": 0,
+            "last_activity": time.time()
         }
 
         emit("jam:host", {"user_id": user_id}, room=room)
@@ -2925,7 +2974,8 @@ def jam_join(data):
             "song_id": None,
             "started_at": None,
             "paused": True,
-            "position": 0
+            "position": 0,
+            "last_activity": time.time()
         }
         state = jam_state[jam_id]
 
