@@ -286,14 +286,16 @@ def player_play_top():
     song = Song.query.get(song_id)
     if not song: return jsonify(error="Song not found"), 404
 
-    url = full_url(f"/audio/{song.audio_file}") if song.audio_file else None
+    # Return R2 presigned URL directly (eliminates redirect latency)
+    audio_url = get_presigned_url(song.audio_file, "audio") if song.audio_file else None
+    cover_url = get_presigned_url(song.cover_file, "covers") if song.cover_file else None
 
     return jsonify({
         "id": song.id,
         "title": song.title,
         "artist": song.artist,
-        "cover": song.cover_file,
-        "audio": url
+        "cover": cover_url,
+        "audio": audio_url
     })
 
 @app.route("/player/next", methods=["POST"])
@@ -354,8 +356,8 @@ def player_next_top():
         "id": song.id,
         "title": song.title,
         "artist": song.artist,
-        "cover": song.cover_file,
-        "audio": full_url(f"/audio/{song.audio_file}") if song.audio_file else None
+        "cover": get_presigned_url(song.cover_file, "covers") if song.cover_file else None,
+        "audio": get_presigned_url(song.audio_file, "audio") if song.audio_file else None
     })
 
 @app.route("/player/prev", methods=["POST"])
@@ -394,8 +396,8 @@ def player_prev_top():
                     "id": current_song.id,
                     "title": current_song.title,
                     "artist": current_song.artist,
-                    "cover": current_song.cover_file,
-                    "audio": full_url(f"/audio/{current_song.audio_file}") if current_song.audio_file else None
+                    "cover": get_presigned_url(current_song.cover_file, "covers") if current_song.cover_file else None,
+                    "audio": get_presigned_url(current_song.audio_file, "audio") if current_song.audio_file else None
                  })
         return jsonify(error="No history"), 400
 
@@ -415,8 +417,8 @@ def player_prev_top():
         "id": song.id,
         "title": song.title,
         "artist": song.artist,
-        "cover": song.cover_file,
-        "audio": full_url(f"/audio/{song.audio_file}") if song.audio_file else None
+        "cover": get_presigned_url(song.cover_file, "covers") if song.cover_file else None,
+        "audio": get_presigned_url(song.audio_file, "audio") if song.audio_file else None
     })
 
 # MOVED ROUTES TO FIX 404
@@ -594,17 +596,17 @@ def full_url(path):
 raw_r2_url = os.environ.get("R2_PUBLIC_URL", "https://pub-5e22fa30a7744b769bea5ad23240ed75.r2.dev")
 R2_PUBLIC_URL = raw_r2_url.strip().strip("'").strip('"').rstrip("/")
 
-def get_presigned_url(filename, folder):
-    """
-    Generates a Presigned URL for R2 objects.
-    boto3 handles encoding and permissions automatically.
-    """
-    if not filename: return None
-    if filename.startswith("http"): return filename
+# Simple in-memory cache for presigned URLs (cleared hourly or on restart)
+# Key: (filename, folder), Value: (url, timestamp)
+from functools import lru_cache
+import time
 
-    # Ensure key has correct folder prefix
-    # DB stores "Song.mp3", we need "audio/Song.mp3"
-    # But if DB already has "audio/Song.mp3", don't double it.
+@lru_cache(maxsize=1000)
+def _cached_presigned_url(filename, folder, cache_bucket):
+    """
+    Generate presigned URL with caching.
+    cache_bucket: hour bucket (changes every hour to invalidate cache)
+    """
     key = filename
     if not key.startswith(f"{folder}/"):
         key = f"{folder}/{filename}"
@@ -618,10 +620,21 @@ def get_presigned_url(filename, folder):
         return url
     except Exception as e:
         print(f"❌ Presigned URL Gen Failed for {key}: {e}")
-        # Fallback to public URL if presigning fails (e.g., credentials missing)
         from urllib.parse import quote
         safe_key = quote(key)
         return f"{R2_PUBLIC_URL}/{safe_key}"
+
+def get_presigned_url(filename, folder):
+    """
+    Generates a Presigned URL for R2 objects with caching.
+    URLs are cached for ~1 hour (until the hour bucket changes).
+    """
+    if not filename: return None
+    if filename.startswith("http"): return filename
+    
+    # Use hour as cache bucket - cache invalidates when hour changes
+    cache_bucket = int(time.time() // 3600)
+    return _cached_presigned_url(filename, folder, cache_bucket)
 
 @app.route("/covers/<path:filename>")
 def cover(filename):
@@ -1161,7 +1174,8 @@ def get_songs():
             "id": s.id,
             "title": s.title,
             "artist": s.artist,
-            "cover": s.cover_file, # Ensure using the correct field for cover
+            "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
+            "audio_url": get_presigned_url(s.audio_file, "audio") if s.audio_file else None,
             "genre": s.genre
         })
 
@@ -1452,15 +1466,21 @@ def search():
         # Get IDs of what we already found
         existing_ids = {s.id for s in results}
         
-        # Fetch all songs (lite query) to scan in Python
-        # Optimization: In a huge DB, we would use a vector DB or Trigram index (pg_trgm)
-        # But for Krew's current scale (SQLite/Postgres without extensions), this is fine.
-        all_songs = Song.query.all()
+        # OPTIMIZED: Fetch only top 500 most popular songs instead of ALL songs
+        # This prevents memory/performance issues at scale while still covering most use cases
+        fuzzy_candidates = (
+            Song.query
+            .outerjoin(PlayLog, Song.id == PlayLog.song_id)
+            .group_by(Song.id)
+            .order_by(db.func.count(PlayLog.id).desc())
+            .limit(500)
+            .all()
+        )
         
         fuzzy_matches = []
         q_lower = q.lower()
         
-        for song in all_songs:
+        for song in fuzzy_candidates:
             if song.id in existing_ids:
                 continue
                 
@@ -1509,8 +1529,8 @@ def search():
             "title": s.title,
             "artist": s.artist,
             "genre": s.genre,
-            "cover": s.cover_file
-            # Note: We don't send lyrics in search results to keep payload light
+            "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
+            "audio_url": get_presigned_url(s.audio_file, "audio") if s.audio_file else None
         }
 
     if results:
@@ -1564,8 +1584,7 @@ def update_lyrics(song_id):
     if not song:
         return jsonify(error="Song not found"), 404
         
-    # Only update if current lyrics are empty or significantly shorter
-    # This acts as a simple heuristic to prevent overwriting good lyrics with bad ones
+    # Only update if current lyrics are empty or significantly shorter\n    # This acts as a simple heuristic to prevent overwriting good lyrics with bad ones
     current_len = len(song.lyrics) if song.lyrics else 0
     new_len = len(lyrics)
     
@@ -1583,11 +1602,12 @@ def update_lyrics(song_id):
 def stream_song(song_id):
     song = Song.query.get_or_404(song_id)
 
-    # In production, redirect to R2
-    if os.environ.get("FLASK_ENV") == "production":
-        return redirect(get_r2_audio_url(song.audio_file))
+    # Always redirect to R2 presigned URL (faster than local redirect chain)
+    url = get_presigned_url(song.audio_file, "audio")
+    if url:
+        return redirect(url)
 
-    # In development, serve local
+    # Fallback: serve local file
     path = os.path.join(AUDIO_DIR, song.audio_file)
     if not os.path.exists(path):
         return jsonify(error="Audio missing"), 404
@@ -1661,13 +1681,14 @@ def get_playlist_songs(pid):
     return jsonify({
         "id": playlist.id,
         "name": playlist.name,
-        "cover": full_url(f"/covers/{playlist.cover_file}") if playlist.cover_file else None,
+        "cover": get_presigned_url(playlist.cover_file, "covers") if playlist.cover_file else None,
         "songs": [
             {
                 "id": s.id,
                 "title": s.title,
                 "artist": s.artist,
-                "cover": s.cover_file
+                "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
+                "audio_url": get_presigned_url(s.audio_file, "audio") if s.audio_file else None
             }
             for s in songs
         ]
@@ -2040,8 +2061,8 @@ def get_song_details(sid):
         "title": song.title,
         "artist": song.artist,
         "album": song.album,
-        "cover": full_url(f"/covers/{song.cover_file}") if song.cover_file else None,
-        "audio": full_url(f"/songs/{song.id}/stream")
+        "cover": get_presigned_url(song.cover_file, "covers") if song.cover_file else None,
+        "audio": get_presigned_url(song.audio_file, "audio") if song.audio_file else None
     })
 
 
@@ -2157,22 +2178,49 @@ def like_song(sid):
 @jwt_required()
 def my_library():
     user_id = int(get_jwt_identity())
+    
+    # Pagination params (optional - for backward compatibility)
+    page = request.args.get("page", type=int)
+    limit = request.args.get("limit", 50, type=int)
 
-    likes = (
+    base_query = (
         db.session.query(Like, Song)
         .join(Song, Like.song_id == Song.id)
         .filter(Like.user_id == user_id)
         .order_by(Like.id.desc())  # recent first
-        .all()
     )
+    
+    # If pagination requested, return paginated response
+    if page is not None:
+        total = base_query.count()
+        likes = base_query.offset((page - 1) * limit).limit(limit).all()
+        
+        return jsonify({
+            "items": [
+                {
+                    "id": song.id,
+                    "title": song.title,
+                    "artist": song.artist,
+                    "cover": get_presigned_url(song.cover_file, "covers") if song.cover_file else None,
+                    "audio_url": get_presigned_url(song.audio_file, "audio") if song.audio_file else None
+                }
+                for like, song in likes
+            ],
+            "total": total,
+            "page": page,
+            "pages": (total + limit - 1) // limit
+        })
+    
+    # Backward compatible: return all if no pagination
+    likes = base_query.all()
 
     return jsonify([
         {
             "id": song.id,
             "title": song.title,
             "artist": song.artist,
-            "cover": full_url(f"/covers/{song.cover_file}") if song.cover_file else None
-
+            "cover": get_presigned_url(song.cover_file, "covers") if song.cover_file else None,
+            "audio_url": get_presigned_url(song.audio_file, "audio") if song.audio_file else None
         }
         for like, song in likes
     ])
@@ -2598,24 +2646,27 @@ def get_recent_tracks():
     # Get latest 50 plays to extract unique recent songs
     logs = PlayLog.query.filter_by(user_id=user_id).order_by(PlayLog.played_at.desc()).limit(50).all()
 
+    # Batch fetch all songs to avoid N+1 query
+    song_ids = [log.song_id for log in logs]
+    songs_map = {s.id: s for s in Song.query.filter(Song.id.in_(song_ids)).all()}
+
     seen = set()
     unique_songs = []
     
     for log in logs:
-        if log.song_id not in seen:
-            s = Song.query.get(log.song_id)
-            if s:
-                seen.add(log.song_id)
-                unique_songs.append({
-                    "id": s.id,
-                    "title": s.title,
-                    "artist": s.artist,
-                    "album": s.album,
-                    "cover": s.cover_file
-                    # "duration": s.duration  <-- removed to fix crash
-                })
-                if len(unique_songs) >= 20:
-                    break
+        if log.song_id not in seen and log.song_id in songs_map:
+            s = songs_map[log.song_id]
+            seen.add(log.song_id)
+            unique_songs.append({
+                "id": s.id,
+                "title": s.title,
+                "artist": s.artist,
+                "album": s.album,
+                "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
+                "audio_url": get_presigned_url(s.audio_file, "audio") if s.audio_file else None
+            })
+            if len(unique_songs) >= 20:
+                break
 
     return jsonify(unique_songs)
 # =========================================================
@@ -2649,7 +2700,13 @@ def song_radio(sid):
     songs = same_artist + same_genre
     
     return jsonify([
-        {"id": s.id, "title": s.title, "artist": s.artist, "cover": s.cover_file}
+        {
+            "id": s.id, 
+            "title": s.title, 
+            "artist": s.artist, 
+            "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
+            "audio_url": get_presigned_url(s.audio_file, "audio") if s.audio_file else None
+        }
         for s in songs
     ])
 @app.route("/radio/artist/<artist>")
@@ -2671,7 +2728,8 @@ def artist_radio(artist):
             "id": s.id,
             "title": s.title,
             "artist": s.artist,
-            "cover": s.cover_file
+            "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
+            "audio_url": get_presigned_url(s.audio_file, "audio") if s.audio_file else None
         }
         for s in songs
     ])
@@ -2689,7 +2747,8 @@ def album_radio(album):
             "id": s.id,
             "title": s.title,
             "artist": s.artist,
-            "cover": s.cover_file
+            "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
+            "audio_url": get_presigned_url(s.audio_file, "audio") if s.audio_file else None
         }
         for s in songs
     ])
@@ -2769,7 +2828,8 @@ def because_you_listened(sid):
             "title": s.title,
             "artist": s.artist,
             "album": s.album,
-            "cover": s.cover_file,
+            "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
+            "audio_url": get_presigned_url(s.audio_file, "audio") if s.audio_file else None
         }
         for s in dict.fromkeys(results)
     ])
@@ -3161,7 +3221,13 @@ def recommendations():
     )
 
     return jsonify([
-        {"id": s.id, "title": s.title, "artist": s.artist, "cover": s.cover_file}
+        {
+            "id": s.id, 
+            "title": s.title, 
+            "artist": s.artist, 
+            "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
+            "audio_url": get_presigned_url(s.audio_file, "audio") if s.audio_file else None
+        }
         for s in songs
     ])
 
@@ -3202,7 +3268,7 @@ def capsule_stats():
             "id": s.id,
             "title": s.title,
             "artist": s.artist,
-            "cover": full_url(f"/covers/{s.cover_file}") if s.cover_file else None,
+            "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
             "plays": plays
         }
         for s, plays in top_songs_res
