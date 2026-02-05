@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Krew - Music Together</title>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700;800;900&family=Monument+Extended:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Archivo+Black&family=DM+Sans:wght@400;500;700&display=swap');
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #000;
+            font-family: 'DM Sans', sans-serif;
+            overflow: hidden;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .reel-container {
+            width: 1080px;
+            height: 1920px;
+            background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 50%, #0a0a0a 100%);
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* Background Effects */
+        .bg-grid {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            background-image: 
+                linear-gradient(rgba(29, 185, 84, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(29, 185, 84, 0.03) 1px, transparent 1px);
+            background-size: 50px 50px;
+            animation: gridMove 20s linear infinite;
+            z-index: 1;
+        }
+
+        @keyframes gridMove {
+            0% { transform: translateY(0); }
+            100% { transform: translateY(50px); }
+        }
+
+        .gradient-orb {
+            position: absolute;
+            width: 800px;
+            height: 800px;
+            border-radius: 50%;
+            filter: blur(120px);
+            opacity: 0.3;
+            animation: float 8s ease-in-out infinite;
+        }
+
+        .orb-1 {
+            background: radial-gradient(circle, #1db954 0%, transparent 70%);
+            top: -200px;
+            right: -200px;
+            animation-delay: 0s;
+        }
+
+        .orb-2 {
+            background: radial-gradient(circle, #6366f1 0%, transparent 70%);
+            bottom: -200px;
+            left: -200px;
+            animation-delay: 2s;
+        }
+
+        .orb-3 {
+            background: radial-gradient(circle, #ec4899 0%, transparent 70%);
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            animation-delay: 4s;
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translate(0, 0) scale(1); }
+            33% { transform: translate(30px, -30px) scale(1.1); }
+            66% { transform: translate(-30px, 30px) scale(0.9); }
+        }
+
+        /* Scene Container */
+        .scene {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 100px;
+            z-index: 10;
+            opacity: 0;
+        }
+
+        .scene.active {
+            animation: fadeIn 0.8s ease forwards;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+
+        @keyframes fadeOut {
+            from { opacity: 1; transform: scale(1); }
+            to { opacity: 0; transform: scale(1.05); }
+        }
+
+        /* Scene 1: Logo Intro */
+        .logo-intro {
+            text-align: center;
+        }
+
+        .logo-text {
+            font-family: 'Archivo Black', sans-serif;
+            font-size: 280px;
+            font-weight: 900;
+            background: linear-gradient(135deg, #1db954 0%, #1ed760 50%, #1db954 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: -8px;
+            line-height: 1;
+            animation: logoGlow 2s ease-in-out infinite;
+            text-transform: lowercase;
+        }
+
+        @keyframes logoGlow {
+            0%, 100% { filter: drop-shadow(0 0 40px rgba(29, 185, 84, 0.5)); }
+            50% { filter: drop-shadow(0 0 80px rgba(29, 185, 84, 0.8)); }
+        }
+
+        .tagline {
+            font-size: 56px;
+            color: rgba(255, 255, 255, 0.7);
+            margin-top: 40px;
+            font-weight: 300;
+            letter-spacing: 2px;
+        }
+
+        /* Scene 2: Feature Showcase */
+        .feature-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 40px;
+            width: 100%;
+            max-width: 900px;
+        }
+
+        .feature-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 2px solid rgba(29, 185, 84, 0.2);
+            border-radius: 40px;
+            padding: 60px 40px;
+            backdrop-filter: blur(10px);
+            position: relative;
+            overflow: hidden;
+            transform: translateY(50px);
+            opacity: 0;
+        }
+
+        .feature-card::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(29, 185, 84, 0.1) 0%, transparent 70%);
+            animation: cardGlow 4s ease-in-out infinite;
+        }
+
+        @keyframes cardGlow {
+            0%, 100% { transform: translate(0, 0); }
+            50% { transform: translate(20px, 20px); }
+        }
+
+        .active .feature-card:nth-child(1) { animation: slideUp 0.6s ease 0.2s forwards; }
+        .active .feature-card:nth-child(2) { animation: slideUp 0.6s ease 0.4s forwards; }
+        .active .feature-card:nth-child(3) { animation: slideUp 0.6s ease 0.6s forwards; }
+        .active .feature-card:nth-child(4) { animation: slideUp 0.6s ease 0.8s forwards; }
+
+        @keyframes slideUp {
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+
+        .feature-icon {
+            font-size: 80px;
+            margin-bottom: 30px;
+            display: block;
+        }
+
+        .feature-title {
+            font-size: 42px;
+            font-weight: 700;
+            color: #fff;
+            margin-bottom: 15px;
+        }
+
+        .feature-desc {
+            font-size: 28px;
+            color: rgba(255, 255, 255, 0.6);
+            line-height: 1.4;
+        }
+
+        /* Scene 3: Live Rooms */
+        .live-room-visual {
+            position: relative;
+            width: 800px;
+            height: 800px;
+        }
+
+        .room-title {
+            font-family: 'Archivo Black', sans-serif;
+            font-size: 120px;
+            color: #fff;
+            text-align: center;
+            margin-bottom: 80px;
+            line-height: 1.1;
+        }
+
+        .room-title span {
+            background: linear-gradient(135deg, #1db954 0%, #6366f1 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .listener-avatars {
+            display: flex;
+            justify-content: center;
+            gap: 30px;
+            flex-wrap: wrap;
+            max-width: 700px;
+        }
+
+        .avatar {
+            width: 180px;
+            height: 180px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #1db954, #1ed760);
+            border: 6px solid rgba(29, 185, 84, 0.3);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 80px;
+            animation: avatarPulse 2s ease-in-out infinite;
+            opacity: 0;
+            transform: scale(0);
+        }
+
+        .active .avatar:nth-child(1) { animation: avatarPop 0.5s ease 0.3s forwards, avatarPulse 2s ease-in-out 0.8s infinite; }
+        .active .avatar:nth-child(2) { animation: avatarPop 0.5s ease 0.5s forwards, avatarPulse 2s ease-in-out 1s infinite; }
+        .active .avatar:nth-child(3) { animation: avatarPop 0.5s ease 0.7s forwards, avatarPulse 2s ease-in-out 1.2s infinite; }
+        .active .avatar:nth-child(4) { animation: avatarPop 0.5s ease 0.9s forwards, avatarPulse 2s ease-in-out 1.4s infinite; }
+        .active .avatar:nth-child(5) { animation: avatarPop 0.5s ease 1.1s forwards, avatarPulse 2s ease-in-out 1.6s infinite; }
+
+        @keyframes avatarPop {
+            0% { transform: scale(0); opacity: 0; }
+            50% { transform: scale(1.2); }
+            100% { transform: scale(1); opacity: 1; }
+        }
+
+        @keyframes avatarPulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(29, 185, 84, 0.7); }
+            50% { box-shadow: 0 0 0 30px rgba(29, 185, 84, 0); }
+        }
+
+        .live-badge {
+            background: linear-gradient(135deg, #ef4444, #dc2626);
+            padding: 20px 50px;
+            border-radius: 50px;
+            font-size: 36px;
+            font-weight: 700;
+            color: #fff;
+            margin-top: 60px;
+            display: inline-block;
+            animation: livePulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes livePulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+
+        /* Scene 4: Stats */
+        .stats-container {
+            text-align: center;
+        }
+
+        .stats-title {
+            font-family: 'Archivo Black', sans-serif;
+            font-size: 100px;
+            color: #fff;
+            margin-bottom: 100px;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 60px;
+            max-width: 900px;
+        }
+
+        .stat-item {
+            opacity: 0;
+            transform: translateY(30px);
+        }
+
+        .active .stat-item:nth-child(1) { animation: statFadeIn 0.6s ease 0.3s forwards; }
+        .active .stat-item:nth-child(2) { animation: statFadeIn 0.6s ease 0.5s forwards; }
+        .active .stat-item:nth-child(3) { animation: statFadeIn 0.6s ease 0.7s forwards; }
+
+        @keyframes statFadeIn {
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .stat-number {
+            font-size: 140px;
+            font-weight: 900;
+            background: linear-gradient(135deg, #1db954 0%, #1ed760 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            line-height: 1;
+            margin-bottom: 20px;
+        }
+
+        .stat-label {
+            font-size: 36px;
+            color: rgba(255, 255, 255, 0.7);
+            font-weight: 500;
+        }
+
+        /* Scene 5: CTA */
+        .cta-container {
+            text-align: center;
+        }
+
+        .cta-title {
+            font-family: 'Archivo Black', sans-serif;
+            font-size: 140px;
+            color: #fff;
+            margin-bottom: 60px;
+            line-height: 1.1;
+        }
+
+        .cta-subtitle {
+            font-size: 56px;
+            color: rgba(255, 255, 255, 0.7);
+            margin-bottom: 80px;
+        }
+
+        .download-btn {
+            background: linear-gradient(135deg, #1db954 0%, #1ed760 100%);
+            color: #000;
+            font-size: 52px;
+            font-weight: 700;
+            padding: 40px 100px;
+            border-radius: 80px;
+            border: none;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 20px 60px rgba(29, 185, 84, 0.4);
+            opacity: 0;
+            transform: scale(0.8);
+        }
+
+        .active .download-btn {
+            animation: btnPop 0.6s ease 0.5s forwards;
+        }
+
+        @keyframes btnPop {
+            0% { transform: scale(0.8); opacity: 0; }
+            50% { transform: scale(1.1); }
+            100% { transform: scale(1); opacity: 1; }
+        }
+
+        .download-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 30px 80px rgba(29, 185, 84, 0.6);
+        }
+
+        .app-icons {
+            margin-top: 60px;
+            display: flex;
+            gap: 40px;
+            justify-content: center;
+            opacity: 0;
+        }
+
+        .active .app-icons {
+            animation: fadeIn 0.6s ease 0.8s forwards;
+        }
+
+        .app-icon {
+            font-size: 100px;
+            opacity: 0.7;
+            transition: opacity 0.3s;
+        }
+
+        .app-icon:hover {
+            opacity: 1;
+        }
+
+        /* Music Visualization */
+        .music-bars {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+            margin-top: 60px;
+            height: 200px;
+            align-items: flex-end;
+        }
+
+        .bar {
+            width: 30px;
+            background: linear-gradient(180deg, #1db954 0%, #1ed760 100%);
+            border-radius: 15px;
+            animation: musicPulse 0.8s ease-in-out infinite;
+        }
+
+        .bar:nth-child(1) { animation-delay: 0s; }
+        .bar:nth-child(2) { animation-delay: 0.1s; }
+        .bar:nth-child(3) { animation-delay: 0.2s; }
+        .bar:nth-child(4) { animation-delay: 0.3s; }
+        .bar:nth-child(5) { animation-delay: 0.4s; }
+        .bar:nth-child(6) { animation-delay: 0.3s; }
+        .bar:nth-child(7) { animation-delay: 0.2s; }
+        .bar:nth-child(8) { animation-delay: 0.1s; }
+
+        @keyframes musicPulse {
+            0%, 100% { height: 40%; }
+            50% { height: 100%; }
+        }
+
+        /* Progress Bar */
+        .progress-bar {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 0%;
+            height: 8px;
+            background: linear-gradient(90deg, #1db954 0%, #1ed760 100%);
+            z-index: 100;
+            animation: progress 30s linear forwards;
+        }
+
+        @keyframes progress {
+            to { width: 100%; }
+        }
+
+        /* Timer */
+        .timer {
+            position: absolute;
+            top: 60px;
+            right: 60px;
+            font-size: 48px;
+            color: rgba(255, 255, 255, 0.5);
+            font-weight: 700;
+            font-family: 'DM Sans', monospace;
+            z-index: 100;
+        }
+    </style>
+</head>
+<body>
+    <div class="reel-container">
+        <!-- Background Effects -->
+        <div class="bg-grid"></div>
+        <div class="gradient-orb orb-1"></div>
+        <div class="gradient-orb orb-2"></div>
+        <div class="gradient-orb orb-3"></div>
+
+        <!-- Timer -->
+        <div class="timer" id="timer">0:00</div>
+
+        <!-- Scene 1: Logo Intro (0-5s) -->
+        <div class="scene active" id="scene1">
+            <div class="logo-intro">
+                <div class="logo-text">krew</div>
+                <div class="tagline">music together</div>
+                <div class="music-bars">
+                    <div class="bar"></div>
+                    <div class="bar"></div>
+                    <div class="bar"></div>
+                    <div class="bar"></div>
+                    <div class="bar"></div>
+                    <div class="bar"></div>
+                    <div class="bar"></div>
+                    <div class="bar"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Scene 2: Features (5-12s) -->
+        <div class="scene" id="scene2">
+            <div class="feature-grid">
+                <div class="feature-card">
+                    <span class="feature-icon">🎵</span>
+                    <div class="feature-title">Stream</div>
+                    <div class="feature-desc">Unlimited music library at your fingertips</div>
+                </div>
+                <div class="feature-card">
+                    <span class="feature-icon">💬</span>
+                    <div class="feature-title">Chat</div>
+                    <div class="feature-desc">Connect with friends while you listen</div>
+                </div>
+                <div class="feature-card">
+                    <span class="feature-icon">📊</span>
+                    <div class="feature-title">Stats</div>
+                    <div class="feature-desc">Track your listening journey</div>
+                </div>
+                <div class="feature-card">
+                    <span class="feature-icon">❤️</span>
+                    <div class="feature-title">Curate</div>
+                    <div class="feature-desc">Build playlists that match your vibe</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Scene 3: Live Rooms (12-19s) -->
+        <div class="scene" id="scene3">
+            <div class="live-room-visual">
+                <div class="room-title">Listen <span>Live</span></div>
+                <div class="listener-avatars">
+                    <div class="avatar">🎧</div>
+                    <div class="avatar">🎵</div>
+                    <div class="avatar">🎸</div>
+                    <div class="avatar">🎹</div>
+                    <div class="avatar">🎤</div>
+                </div>
+                <div class="live-badge">🔴 LIVE ROOMS</div>
+            </div>
+        </div>
+
+        <!-- Scene 4: Stats (19-24s) -->
+        <div class="scene" id="scene4">
+            <div class="stats-container">
+                <div class="stats-title">By The Numbers</div>
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <div class="stat-number">1K+</div>
+                        <div class="stat-label">Songs</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-number">24/7</div>
+                        <div class="stat-label">Streaming</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-number">∞</div>
+                        <div class="stat-label">Vibes</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Scene 5: CTA (24-30s) -->
+        <div class="scene" id="scene5">
+            <div class="cta-container">
+                <div class="cta-title">Join the<br>Krew</div>
+                <div class="cta-subtitle">Your music. Your people. Your vibe.</div>
+                <button class="download-btn">Download Now</button>
+                <div class="app-icons">
+                    <span class="app-icon">📱</span>
+                    <span class="app-icon">💻</span>
+                    <span class="app-icon">🌐</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Progress Bar -->
+        <div class="progress-bar"></div>
+    </div>
+
+    <script>
+        // Scene timing (in seconds)
+        const scenes = [
+            { id: 'scene1', start: 0, end: 5 },
+            { id: 'scene2', start: 5, end: 12 },
+            { id: 'scene3', start: 12, end: 19 },
+            { id: 'scene4', start: 19, end: 24 },
+            { id: 'scene5', start: 24, end: 30 }
+        ];
+
+        let currentTime = 0;
+        let currentSceneIndex = 0;
+
+        function updateTimer() {
+            const minutes = Math.floor(currentTime / 60);
+            const seconds = currentTime % 60;
+            document.getElementById('timer').textContent = 
+                `${minutes}:${seconds.toString().padStart(2, '0')}`;
+        }
+
+        function showScene(index) {
+            // Hide all scenes
+            document.querySelectorAll('.scene').forEach(scene => {
+                scene.classList.remove('active');
+                scene.style.animation = 'fadeOut 0.5s ease forwards';
+            });
+
+            // Show target scene
+            setTimeout(() => {
+                const targetScene = document.getElementById(scenes[index].id);
+                targetScene.classList.add('active');
+                targetScene.style.animation = 'fadeIn 0.8s ease forwards';
+            }, 500);
+        }
+
+        function animate() {
+            currentTime++;
+            updateTimer();
+
+            // Check if we need to switch scenes
+            if (currentTime >= scenes[currentSceneIndex].end && currentSceneIndex < scenes.length - 1) {
+                currentSceneIndex++;
+                showScene(currentSceneIndex);
+            }
+
+            // Loop the reel
+            if (currentTime >= 30) {
+                currentTime = 0;
+                currentSceneIndex = 0;
+                showScene(0);
+                
+                // Reset progress bar
+                const progressBar = document.querySelector('.progress-bar');
+                progressBar.style.animation = 'none';
+                setTimeout(() => {
+                    progressBar.style.animation = 'progress 30s linear forwards';
+                }, 10);
+            }
+
+            setTimeout(animate, 1000);
+        }
+
+        // Start animation
+        animate();
+    </script>
+</body>
+</html>

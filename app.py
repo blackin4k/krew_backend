@@ -151,6 +151,100 @@ def upload_to_r2(local_path, r2_path):
         print(f"❌ R2 Upload Failed: {e}")
         return False
 
+@app.route("/songs/upload", methods=["POST"])
+@jwt_required()
+def upload_song():
+    try:
+        user_id = int(get_jwt_identity())
+        user = User.query.get(user_id)
+        
+        if not user or not user.is_artist:
+            return jsonify(error="Unauthorized: Only approved artists can upload songs."), 403
+
+        if 'audio' not in request.files:
+            return jsonify(error="No audio file part"), 400
+        
+        file = request.files['audio']
+        cover = request.files.get('cover') # Optional
+
+        title = request.form.get('title')
+        artist = request.form.get('artist', user.username) # Default to username if not provided
+        album = request.form.get('album', 'Single')
+        lyrics = request.form.get('lyrics', '')
+
+        if file.filename == '':
+            return jsonify(error="No selected file"), 400
+
+        if file and allowed_file(file.filename, ALLOWED_EXTENSIONS_AUDIO):
+            filename = secure_filename(file.filename)
+            unique_id = str(uuid.uuid4())[:8]
+            filename = f"{unique_id}_{filename}"
+            
+            file.save(os.path.join(app.config['UPLOAD_AUDIO'], filename))
+
+            cover_filename = None
+            if cover and allowed_file(cover.filename, ALLOWED_EXTENSIONS_COVER):
+                cover_fname = secure_filename(cover.filename)
+                cover_fname = f"{unique_id}_{cover_fname}"
+                cover.save(os.path.join(app.config['UPLOAD_COVER'], cover_fname))
+                cover_filename = cover_fname
+            
+            # Metadata Strategy (Simplified)
+            # 1. Start with Form Data (User provided)
+            # 2. Fallback to Auto-Extraction
+            extracted_meta = extract_metadata(os.path.join(app.config['UPLOAD_AUDIO'], filename))
+            
+            final_title = title if title else (extracted_meta["title"] if extracted_meta["title"] else os.path.splitext(request.files['audio'].filename)[0])
+            final_artist = artist if artist else (extracted_meta["artist"] if extracted_meta["artist"] else user.username)
+            final_album = album if album else (extracted_meta["album"] if extracted_meta["album"] else "Unknown")
+            
+            form_genre = request.form.get('genre')
+            final_genre = form_genre if form_genre else (extracted_meta["genre"] if extracted_meta["genre"] else "Unknown")
+
+            # Create Song Record
+            new_song = Song(
+                title=final_title,
+                artist=final_artist,
+                album=final_album,
+                audio_file=filename,
+                cover_file=cover_filename,
+                genre=final_genre,
+                lyrics=lyrics,
+                uploaded_by=user.id 
+            )
+            
+            db.session.add(new_song)
+            db.session.commit()
+
+            # --- AUTO-SYNC TO PROD ---
+            # (In a real app, maybe offset this to a worker, but keeping it simple)
+            try:
+                # 1. Upload to R2
+                audio_path = os.path.join(app.config['UPLOAD_AUDIO'], filename)
+                upload_to_r2(audio_path, f"audio/{filename}")
+                if cover_filename:
+                    cover_path = os.path.join(app.config['UPLOAD_COVER'], cover_filename)
+                    upload_to_r2(cover_path, f"covers/{cover_filename}")
+
+                # 2. Sync Database
+                sync_songs()
+            except Exception as e:
+                print(f"❌ Sync Warning: {e}")
+                # Don't fail the request if sync fails, just log it
+
+            return jsonify({
+                "msg": "Song uploaded successfully!", 
+                "song": {
+                    "id": new_song.id,
+                    "title": new_song.title,
+                    "artist": new_song.artist
+                }
+            }), 201
+
+    except Exception as e:
+        print(f"Upload Error: {e}")
+        return jsonify(error=str(e)), 500
+
 @app.route("/admin/upload", methods=["POST"])
 def admin_upload_song():
     # Simple Security Check (Replace "krew_admin_secret" with a real env var in prod)
@@ -478,6 +572,66 @@ def get_user_profile_top():
         "id": user.id,
         "username": user.username,
         "email": user.email
+    })
+
+@app.route("/artists/<path:name>", methods=["GET"])
+@jwt_required()
+def get_artist_profile(name):
+    # Decode name safely
+    from urllib.parse import unquote
+    artist_name = unquote(name)
+    
+    # 1. Get Songs by Artist
+    songs = Song.query.filter(func.lower(Song.artist) == artist_name.lower()).all()
+    
+    if not songs:
+        # Fuzzy match fallback? Or just 404? 
+        return jsonify(error="Artist not found"), 404
+
+    # 2. Get Bio from User table (if claimed)
+    # Try to find a user whose username matches or is linked
+    # For now, strict match on username or we could add an 'artist_name' field to User later
+    artist_user = User.query.filter(func.lower(User.username) == artist_name.lower(), User.is_artist == True).first()
+    bio = artist_user.artist_bio if artist_user else "Approved Krew Artist"
+
+    # 3. Calculate Stats
+    total_plays = (
+        db.session.query(func.count(PlayLog.id))
+        .join(Song, PlayLog.song_id == Song.id)
+        .filter(func.lower(Song.artist) == artist_name.lower())
+        .scalar()
+    ) or 0
+    
+    # 4. Top Songs (by plays)
+    top_songs_res = (
+        db.session.query(Song, func.count(PlayLog.id).label("plays"))
+        .outerjoin(PlayLog, PlayLog.song_id == Song.id)
+        .filter(func.lower(Song.artist) == artist_name.lower())
+        .group_by(Song.id)
+        .order_by(desc("plays"))
+        .limit(5)
+        .all()
+    )
+    
+    top_songs = [{
+        "id": s.id,
+        "title": s.title,
+        "album": s.album,
+        "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
+        "plays": plays
+    } for s, plays in top_songs_res]
+
+    # 5. Albums
+    albums = list(set([s.album for s in songs if s.album]))
+    
+    return jsonify({
+        "name": songs[0].artist, # Use DB casing
+        "bio": bio,
+        "monthly_listeners": int(total_plays * 0.4), # Fake 'monthly' stat derived from total
+        "total_plays": total_plays,
+        "top_songs": top_songs,
+        "albums": albums,
+        "similar_artists": [] # Placeholder
     })
 
 # =========================================================
@@ -865,6 +1019,15 @@ class SleepTimer(db.Model):
     user_id = db.Column(db.Integer, primary_key=True)
     end_time = db.Column(db.DateTime)
     fade_out = db.Column(db.Boolean, default=False)
+
+class JamSession(db.Model):
+    id = db.Column(db.String(80), primary_key=True)
+    host_id = db.Column(db.Integer, db.ForeignKey("user.id"))
+    song_id = db.Column(db.Integer, db.ForeignKey("song.id"), nullable=True)
+    paused = db.Column(db.Boolean, default=True)
+    position = db.Column(db.Float, default=0.0)
+    started_at = db.Column(db.DateTime, nullable=True)
+    last_active = db.Column(db.DateTime, default=datetime.utcnow)
 
 
 # =========================================================
@@ -2887,6 +3050,16 @@ def cleanup_inactive_jams():
         
         if inactive_jams:
             print(f"🧹 Cleaned up {len(inactive_jams)} inactive jams. Active: {len(jam_state)}")
+            
+            # Identify DB jams explicitly marked as old or just rely on memory cleanup? 
+            # For strictness, let's delete from DB too if they are super old (e.g. 24h) 
+            # to prevent infinite DB growth.
+            try:
+                expiration = datetime.utcnow() - timedelta(hours=24)
+                JamSession.query.filter(JamSession.last_active < expiration).delete()
+                db.session.commit()
+            except Exception as e:
+                print(f"Failed to clean old DB jams: {e}")
 
 # Schedule periodic cleanup (runs every 30 minutes)
 def start_jam_cleanup_scheduler():
@@ -2953,18 +3126,43 @@ def jam_join(data):
 
     # 👑 FIRST USER = HOST
     if jam_id not in jam_hosts:
-        jam_hosts[jam_id] = user_id
+        
+        # TRY LOAD FROM DB
+        db_jam = JamSession.query.get(jam_id)
+        if db_jam:
+             jam_hosts[jam_id] = db_jam.host_id
+             jam_state[jam_id] = {
+                "song_id": db_jam.song_id,
+                "started_at": db_jam.started_at,
+                "paused": db_jam.paused,
+                "position": db_jam.position,
+                "last_activity": time.time()
+             }
+             print(f"📥 Loaded Jam {jam_id} from DB")
+        else:
+            # CREATE NEW
+            jam_hosts[jam_id] = user_id
+            jam_state[jam_id] = {
+                "song_id": None,
+                "started_at": None,
+                "paused": True,
+                "position": 0,
+                "last_activity": time.time()
+            }
+            
+            # SAVE TO DB
+            try:
+                new_jam = JamSession(
+                    id=jam_id,
+                    host_id=user_id,
+                    last_active=datetime.utcnow()
+                )
+                db.session.add(new_jam)
+                db.session.commit()
+            except Exception as e:
+                print(f"Failed to create Jam DB: {e}")
 
-        # Changed: initialize jam_state on first join; jam_state is single source of truth
-        jam_state[jam_id] = {
-            "song_id": None,
-            "started_at": None,
-            "paused": True,
-            "position": 0,
-            "last_activity": time.time()
-        }
-
-        emit("jam:host", {"user_id": user_id}, room=room)
+        emit("jam:host", {"user_id": jam_hosts[jam_id]}, room=room)
 
     # 🔁 SEND CURRENT STATE TO JOINER (only to the joining socket)
     state = jam_state.get(jam_id)
@@ -3017,6 +3215,19 @@ def jam_play(data):
         "paused": False,
         "position": position
     }
+    
+    # DB SYNC
+    try:
+        jam_db = JamSession.query.get(jam_id)
+        if jam_db:
+            jam_db.song_id = song_id
+            jam_db.started_at = datetime.utcnow()
+            jam_db.paused = False
+            jam_db.position = position
+            jam_db.last_active = datetime.utcnow()
+            db.session.commit()
+    except Exception as e:
+        print(f"Jam DB Sync Error (Play): {e}")
 
     # Broadcast to all listeners
     broadcast_jam_state(jam_id, "jam:play")
@@ -3042,6 +3253,18 @@ def jam_pause(data):
     state["position"] = pos
     state["started_at"] = None  # freeze clock
 
+    # DB SYNC
+    try:
+        jam_db = JamSession.query.get(jam_id)
+        if jam_db:
+            jam_db.paused = True
+            jam_db.position = pos
+            jam_db.started_at = None
+            jam_db.last_active = datetime.utcnow()
+            db.session.commit()
+    except Exception as e:
+        print(f"Jam DB Sync Error (Pause): {e}")
+
     broadcast_jam_state(jam_id, "jam:pause")
 @socketio.on("jam:seek")
 def jam_seek(data):
@@ -3060,6 +3283,18 @@ def jam_seek(data):
     # Changed: update position only, preserve paused state
     state["position"] = position
     state["started_at"] = datetime.utcnow() if not state.get("paused") else None
+
+    # DB SYNC
+    try:
+        jam_db = JamSession.query.get(jam_id)
+        if jam_db:
+            jam_db.position = position
+            if not state.get("paused"):
+                jam_db.started_at = datetime.utcnow()
+            jam_db.last_active = datetime.utcnow()
+            db.session.commit()
+    except Exception as e:
+        print(f"Jam DB Sync Error (Seek): {e}")
 
     broadcast_jam_state(jam_id, "jam:seek")
 
@@ -3159,6 +3394,18 @@ def jam_vote_skip(data):
             "paused": False,
             "position": 0.0
         }
+        
+        # DB SYNC (Vote Skip -> Next Song)
+        try:
+            jam_db = JamSession.query.get(jam_id)
+            if jam_db:
+                jam_db.song_id = next_song_id
+                jam_db.started_at = datetime.utcnow()
+                jam_db.paused = False
+                jam_db.position = 0.0
+                jam_db.last_active = datetime.utcnow()
+                db.session.commit()
+        except: pass
 
         broadcast_jam_state(jam_id, "jam:play")
 
@@ -3198,6 +3445,14 @@ def on_disconnect():
             new_host_id = remaining_ids[0]
             jam_hosts[jam_id] = new_host_id
             emit("jam:host", {"user_id": new_host_id}, room=f"jam:{jam_id}")
+            
+            # Update Host in DB
+            try:
+                jam_db = JamSession.query.get(jam_id)
+                if jam_db:
+                    jam_db.host_id = new_host_id
+                    db.session.commit()
+            except: pass
         else:
             # No listeners remain; cleanup jam state
             jam_hosts.pop(jam_id, None)
