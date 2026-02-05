@@ -1363,65 +1363,6 @@ def get_songs():
 
 
 
-# =========================================================
-# SONG UPLOAD + STREAM
-# =========================================================
-
-
-
-@app.route("/songs/upload", methods=["POST"])
-@jwt_required()
-def upload_song():
-    user_id = int(get_jwt_identity())
-    
-    # Check if user is a verified artist
-    user = db.session.get(User, user_id)
-    if not user or not user.is_artist:
-        return jsonify(error="Only verified artists can upload music. Please apply for artist verification."), 403
-
-    # Validate required form fields
-    title = request.form.get("title", "").strip()
-    artist = request.form.get("artist", "").strip()
-    if not title or not artist:
-        return jsonify(error="title and artist are required"), 400
-
-    # Validate files presence
-    if "audio" not in request.files:
-        return jsonify(error="audio file is required"), 400
-    if "cover" not in request.files:
-        return jsonify(error="cover image is required"), 400
-
-    audio = request.files["audio"]
-    cover = request.files["cover"]
-
-    # Basic content-type/extension checks
-    allowed_audio_ext = {".mp3"}
-    allowed_cover_ext = {".jpg", ".jpeg", ".png"}
-    audio_ext = os.path.splitext(audio.filename)[1].lower()
-    cover_ext = os.path.splitext(cover.filename)[1].lower()
-    if audio_ext not in allowed_audio_ext:
-        return jsonify(error="Only .mp3 audio is allowed"), 400
-    if cover_ext not in allowed_cover_ext:
-        return jsonify(error="Cover must be .jpg, .jpeg, or .png"), 400
-
-    audio_name = f"{uuid.uuid4()}_{os.path.basename(audio.filename)}"
-    cover_name = f"{uuid.uuid4()}_{os.path.basename(cover.filename)}"
-
-    audio.save(os.path.join(AUDIO_DIR, audio_name))
-    cover.save(os.path.join(COVER_DIR, cover_name))
-
-    song = Song(
-        title=title,
-        artist=artist,
-        audio_file=audio_name,
-        cover_file=cover_name,
-        uploaded_by=user_id
-    )
-
-    db.session.add(song)
-    db.session.commit()
-
-    return jsonify(msg="Song uploaded")
 
 
 # =========================================================
