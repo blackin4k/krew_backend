@@ -791,13 +791,27 @@ def _cached_presigned_url(filename, folder, cache_bucket):
 
 def get_presigned_url(filename, folder):
     """
-    Generates a Presigned URL for R2 objects with caching.
-    URLs are cached for ~1 hour (until the hour bucket changes).
+    Returns a Public R2 URL for faster loading (cached by CDN).
+    Falls back to presigned if R2_PUBLIC_URL is not set (but it should be).
     """
     if not filename: return None
     if filename.startswith("http"): return filename
     
+    # 🚀 ACCELERATION: Use Public URL (No boto3 overhead, Cacheable)
+    if R2_PUBLIC_URL:
+        from urllib.parse import quote
+        # R2/S3 keys are case sensitive. Our folder structure is "audio/" and "covers/"
+        # Ensure we don't double up the folder if it's already in the filename (legacy data)
+        key = filename
+        if not key.startswith(f"{folder}/"):
+            key = f"{folder}/{filename}"
+            
+        safe_key = quote(key)
+        return f"{R2_PUBLIC_URL}/{safe_key}"
+            
+    # Fallback to slow presigned URL
     # Use hour as cache bucket - cache invalidates when hour changes
+
     cache_bucket = int(time.time() // 3600)
     return _cached_presigned_url(filename, folder, cache_bucket)
 
@@ -2525,6 +2539,57 @@ def get_sleep_timer():
 
 
 
+@app.route("/search", methods=["GET"])
+def search():
+    query = request.args.get("q", "").strip()
+    if not query:
+        return jsonify([])
+
+    # Weighted Search
+    # 1. Exact Title Match
+    # 2. Title Starts With
+    # 3. Artist Match
+    # 4. Lyrics Match (if available)
+    
+    # We fetch more and filter in Python for complex weighting if DB is simple sqlite/postgres mix
+    # But SQL `LikE` is efficient enough for now.
+    
+    results = []
+    seen_ids = set()
+
+    # Helper to add unique
+    def add_songs(songs_list, origin):
+        for s in songs_list:
+            if s.id not in seen_ids:
+                results.append({
+                    "id": s.id,
+                    "title": s.title,
+                    "artist": s.artist,
+                    "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
+                    "audio": get_presigned_url(s.audio_file, "audio") if s.audio_file else None,
+                    "match_type": origin
+                })
+                seen_ids.add(s.id)
+
+    # 1. Exact/Close Title
+    exact = Song.query.filter(Song.title.ilike(f"{query}%")).limit(10).all()
+    add_songs(exact, "title_exact")
+
+    # 2. Artist
+    artist_matches = Song.query.filter(Song.artist.ilike(f"%{query}%")).limit(10).all()
+    add_songs(artist_matches, "artist")
+
+    # 3. Lyrics (Broad search)
+    # Check if lyrics column exists first (it should based on models)
+    try:
+        lyrics_matches = Song.query.filter(Song.lyrics.ilike(f"%{query}%")).limit(5).all()
+        add_songs(lyrics_matches, "lyrics")
+    except:
+        pass # Lyrics column might be missing in some DB states
+
+    return jsonify(results)
+
+
 @app.route("/artists/<artist_name>")
 def artist_page(artist_name):
     # Search for songs where artist_name is one of the split names
@@ -2677,28 +2742,29 @@ def autoplay_fill(state):
     # Create fuzzy filters for each artist part
     artist_filters = [Song.artist.ilike(f"%{a}%") for a in artists]
     
+    # Prioritize: Songs by same artist(s), excluding current
     related = (
         Song.query
         .filter(or_(*artist_filters))
         .filter(Song.id.notin_(existing_ids))
         .order_by(func.random())
-        .limit(5)
+        .limit(10) # Fetched more
         .all()
     )
 
-    # 2. Try: Same Genre + Random (if artist exhausted)
-    # Only if genre is meaningful (not Unknown/Import)
+    # 2. Try: Same Genre (if shortage)
     valid_genre = last_song.genre and last_song.genre.lower() not in ['unknown', 'import', 'other', 'single', 'undefined']
     
-    if len(related) < 5 and valid_genre:
+    if len(related) < 10 and valid_genre:
         genre_songs = (
             Song.query
             .filter(
                 Song.genre == last_song.genre,
-                Song.id.notin_(existing_ids)
+                Song.id.notin_(existing_ids),
+                ~Song.id.in_([s.id for s in related])
             )
             .order_by(func.random())
-            .limit(5 - len(related))
+            .limit(10 - len(related))
             .all()
         )
         related.extend(genre_songs)
@@ -2708,8 +2774,9 @@ def autoplay_fill(state):
         random_songs = (
             Song.query
             .filter(Song.id.notin_(existing_ids))
+            .filter(~Song.id.in_([s.id for s in related]))
             .order_by(func.random())
-            .limit(5 - len(related))
+            .limit(10 - len(related))
             .all()
         )
         related.extend(random_songs)
@@ -2725,8 +2792,14 @@ def autoplay_fill(state):
 
     # 🔥 CRITICAL: keep shuffle in sync
     if state.shuffle:
-        shuffled = queue[:]
-        random.shuffle(shuffled)
+        shuffled = json.loads(state.shuffled_queue) if state.shuffled_queue else []
+        # Add new songs to shuffled queue too (randomly inserted or appended)
+        # For simplicity, just append and shuffle the new chunk? 
+        # Or just append to end of shuffled.
+        shuffled.extend(new_ids)
+        # Re-shuffle only the new part? No, users expect random. 
+        # But we don't want to reshuffle the *played* history.
+        # Just appending is fine for "autoplay" feel.
         state.shuffled_queue = json.dumps(shuffled)
 
 @app.route("/player/queue/add", methods=["POST"])
@@ -4181,7 +4254,7 @@ def global_stats():
         .order_by(desc("plays"))
         .limit(limit)
         .all()
-    )
+    ) 
     
     return jsonify([
         {
