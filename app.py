@@ -30,7 +30,7 @@ from mutagen.flac import FLAC
 from mutagen.wave import WAVE
 
 from sqlalchemy.exc import IntegrityError
-from flask import Flask, request, jsonify, send_file, send_from_directory, redirect
+from flask import Flask, request, jsonify, send_file, send_from_directory, redirect, stream_with_context
 from flask import Response
 from flask_sqlalchemy import SQLAlchemy
 import difflib # For fuzzy search
@@ -391,8 +391,9 @@ def player_play_top():
     song = Song.query.get(song_id)
     if not song: return jsonify(error="Song not found"), 404
 
-    # Return R2 presigned URL directly (eliminates redirect latency)
-    audio_url = get_presigned_url(song.audio_file, "audio") if song.audio_file else None
+    # CORS FIX: Always route through our proxy endpoint
+    # This prevents the frontend from hitting R2 directly (which lacks CORS headers)
+    audio_url = full_url(f"/songs/{song.id}/stream")
     cover_url = get_presigned_url(song.cover_file, "covers") if song.cover_file else None
 
     return jsonify({
@@ -462,7 +463,7 @@ def player_next_top():
         "title": song.title,
         "artist": song.artist,
         "cover": get_presigned_url(song.cover_file, "covers") if song.cover_file else None,
-        "audio": get_presigned_url(song.audio_file, "audio") if song.audio_file else None
+        "audio": full_url(f"/songs/{song.id}/stream")
     })
 
 @app.route("/player/prev", methods=["POST"])
@@ -502,7 +503,7 @@ def player_prev_top():
                     "title": current_song.title,
                     "artist": current_song.artist,
                     "cover": get_presigned_url(current_song.cover_file, "covers") if current_song.cover_file else None,
-                    "audio": get_presigned_url(current_song.audio_file, "audio") if current_song.audio_file else None
+                    "audio": full_url(f"/songs/{current_song.id}/stream")
                  })
         return jsonify(error="No history"), 400
 
@@ -523,7 +524,7 @@ def player_prev_top():
         "title": song.title,
         "artist": song.artist,
         "cover": get_presigned_url(song.cover_file, "covers") if song.cover_file else None,
-        "audio": get_presigned_url(song.audio_file, "audio") if song.audio_file else None
+        "audio": full_url(f"/songs/{song.id}/stream")
     })
 
 # MOVED ROUTES TO FIX 404
@@ -1323,7 +1324,9 @@ def get_artist_details(name):
             "album": s.album or "", 
             "cover": s.cover_file or "", # GUARANTEE STRING
             "url": full_url(f"/audio/{s.audio_file}") if s.audio_file else None,
-            "genre": s.genre or ""
+            "genre": s.genre or "",
+            "lyrics": s.lyrics,
+            "lyrics": s.lyrics
         }
         for s in songs
     ]
@@ -1364,7 +1367,8 @@ def get_songs():
             "artist": s.artist,
             "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
             "audio_url": get_presigned_url(s.audio_file, "audio") if s.audio_file else None,
-            "genre": s.genre
+            "genre": s.genre,
+            "lyrics": s.lyrics
         })
 
     return jsonify({
@@ -1377,6 +1381,146 @@ def get_songs():
 
 
 
+
+
+
+# =========================================================
+# SEARCH & LANDING
+# =========================================================
+
+@app.route("/search", methods=["GET"])
+def search_songs():
+    q = request.args.get("q", "").strip()
+    genre = request.args.get("genre")
+    
+    if not q and not genre:
+        return jsonify(results=[], recommended=[])
+
+    query = Song.query
+
+    # strict filtering by genre if provided
+    if genre:
+        query = query.filter(Song.genre == genre)
+
+    # fuzzy search logic
+    if q:
+        # PostgreSQL: ilike is case insensitive. SQLite: like is case insensitive by default for ASCII.
+        # We use ilike for Postgres compatibility on Render.
+        search_filter = or_(
+            Song.title.ilike(f"%{q}%"),
+            Song.artist.ilike(f"%{q}%"),
+            Song.album.ilike(f"%{q}%"),
+            Song.lyrics.ilike(f"%{q}%") # Search in lyrics too!
+        )
+        query = query.filter(search_filter)
+
+    # Limit results
+    results = query.limit(50).all()
+
+    # Format
+    data = []
+    for s in results:
+        data.append({
+            "id": s.id,
+            "title": s.title,
+            "artist": s.artist,
+            "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
+            "audio_url": get_presigned_url(s.audio_file, "audio") if s.audio_file else None,
+            "genre": s.genre,
+            "lyrics": s.lyrics
+        })
+
+    return jsonify({
+        "results": data,
+        "recommended": [] # Todo: implement recommendations based on result
+    })
+
+
+@app.route("/song/<int:song_id>")
+def song_landing_page(song_id):
+    """
+    Landing page for Deep Links.
+    If on Mobile -> Try to open App (Intent)
+    If on Desktop -> Show Landing Page with Metadata
+    """
+    song = Song.query.get_or_404(song_id)
+    
+    # Basic Metadata
+    title = song.title
+    artist = song.artist
+    cover_url = get_presigned_url(song.cover_file, "covers") or "https://kreewaux.xyz/logo.png"
+    
+    # Simple HTML Landing Page
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        
+        <!-- Open Graph Data (for Discord/iMessage previews) -->
+        <meta property="og:title" content="{title} by {artist}">
+        <meta property="og:type" content="music.song">
+        <meta property="og:image" content="{cover_url}">
+        <meta property="og:description" content="Listen to {title} on Krew.">
+        <meta property="og:site_name" content="Krew">
+        
+        <title>{title} - Krew</title>
+        
+        <style>
+            body {{
+                background-color: #0A0A0C;
+                color: white;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                height: 100vh;
+                margin: 0;
+                text-align: center;
+            }}
+            .cover {{
+                width: 200px;
+                height: 200px;
+                border-radius: 12px;
+                box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+                margin-bottom: 24px;
+                object-fit: cover;
+            }}
+            h1 {{ margin: 0 0 8px 0; font-size: 24px; }}
+            p {{ margin: 0 0 32px 0; color: #B3B3B3; font-size: 18px; }}
+            .btn {{
+                background: #1DB954;
+                color: black;
+                text-decoration: none;
+                padding: 14px 32px;
+                border-radius: 99px;
+                font-weight: bold;
+                font-size: 16px;
+                transition: transform 0.2s;
+            }}
+            .btn:hover {{ transform: scale(1.05); }}
+        </style>
+    </head>
+    <body>
+        <img src="{cover_url}" alt="Cover" class="cover">
+        <h1>{title}</h1>
+        <p>{artist}</p>
+        
+        <!-- Deep Link to App -->
+        <a href="intent://song/{song_id}#Intent;scheme=https;package=com.krew.music;S.browser_fallback_url=https://play.google.com/store/apps/details?id=com.krew.music;end" class="btn">
+            Open in Krew
+        </a>
+        
+        <script>
+            // Try to open app automatically
+            window.location.href = "intent://api.kreewaux.xyz/song/{song_id}#Intent;scheme=https;package=com.krew.music;end";
+        </script>
+    </body>
+    </html>
+    """
+    return html
 
 
 # =========================================================
@@ -1540,163 +1684,7 @@ def reject_artist_application(app_id):
 
 
 
-@app.route("/search")
-def search():
-    q = request.args.get("q", "").strip()
-    genre = request.args.get("genre")
-    sort = request.args.get("sort", "relevance").lower()
 
-    query = Song.query
-
-    if q:
-        # SMART SEARCH: Tokenize and match ANY field (Title, Artist, Album, Lyrics)
-        # Split by space to get keywords
-        keywords = q.split()
-        
-        # Create a list of AND conditions
-        # For each keyword, it must be present in at least ONE of the fields
-        and_conditions = []
-        for keyword in keywords:
-            keyword_pattern = f"%{keyword}%"
-            and_conditions.append(
-                or_(
-                    Song.title.ilike(keyword_pattern),
-                    Song.artist.ilike(keyword_pattern),
-                    Song.album.ilike(keyword_pattern),
-                    Song.lyrics.ilike(keyword_pattern)
-                )
-            )
-        
-        # Combine all keyword conditions with AND
-        # This means "taylor" AND "swift" must both match something
-        from sqlalchemy import and_
-        query = query.filter(and_(*and_conditions))
-
-    if genre:
-        query = query.filter_by(genre=genre)
-
-    if sort == "plays":
-        # Sort by total play count desc, then recent id desc as tiebreaker
-        query = (
-            query
-            .outerjoin(PlayLog, Song.id == PlayLog.song_id)
-            .group_by(Song.id)
-            .order_by(db.func.count(PlayLog.id).desc(), Song.id.desc())
-        )
-    elif sort == "recent":
-        query = query.order_by(Song.id.desc())
-
-    # Limit results - if smart search, we might get fewer but better matches
-    results = query.limit(50).all()
-
-    # -- FUZZY SEARCH FALLBACK --
-    # If we have very few results and a query was provided, try to find close matches (typos)
-    if q and len(results) < 5:
-        # Get IDs of what we already found
-        existing_ids = {s.id for s in results}
-        
-        # OPTIMIZED: Fetch only top 500 most popular songs instead of ALL songs
-        # This prevents memory/performance issues at scale while still covering most use cases
-        fuzzy_candidates = (
-            Song.query
-            .outerjoin(PlayLog, Song.id == PlayLog.song_id)
-            .group_by(Song.id)
-            .order_by(db.func.count(PlayLog.id).desc())
-            .limit(500)
-            .all()
-        )
-        
-        fuzzy_matches = []
-        q_lower = q.lower()
-        
-        for song in fuzzy_candidates:
-            if song.id in existing_ids:
-                continue
-                
-            # Calculate match ratio for Title and Artist
-            # IMPROVEMENT: Split target into words to handle "artic" vs "Arctic Monkeys"
-            # "artic" vs "Arctic Monkeys" -> Low score
-            # "artic" vs "Arctic" -> High score
-            
-            def get_best_token_ratio(query, target):
-                target_tokens = target.split()
-                if not target_tokens: return 0.0
-                # Compare query against the whole string
-                full_ratio = difflib.SequenceMatcher(None, query, target).ratio()
-                # Compare query against each word
-                token_ratios = [difflib.SequenceMatcher(None, query, t).ratio() for t in target_tokens]
-                return max(full_ratio, *token_ratios)
-
-            # Title match
-            title_score = get_best_token_ratio(q_lower, song.title.lower())
-            
-            # Artist match
-            artist_score = get_best_token_ratio(q_lower, song.artist.lower())
-            
-            # Take the best score
-            best_score = max(title_score, artist_score)
-            
-            # Threshold: 0.6 is usually good for "artic" -> "arctic"
-            if best_score > 0.6:
-                fuzzy_matches.append((best_score, song))
-                
-        # Sort by score descending
-        fuzzy_matches.sort(key=lambda x: x[0], reverse=True)
-        
-        # Add top 5 fuzzy matches
-        for score, song in fuzzy_matches[:5]:
-            results.append(song)
-            existing_ids.add(song.id)
-
-    # -- RECOMMENDATION LOGIC --
-    recommended_songs = []
-    
-    # helper to format song
-    def fmt_song(s):
-        return {
-            "id": s.id,
-            "title": s.title,
-            "artist": s.artist,
-            "genre": s.genre,
-            "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
-            "audio_url": get_presigned_url(s.audio_file, "audio") if s.audio_file else None
-        }
-
-    if results:
-        # Find most common genre and artist in results
-        genres = [s.genre for s in results if s.genre]
-        artists = [s.artist for s in results if s.artist]
-        
-        from collections import Counter
-        genre_counts = Counter(genres).most_common(1)
-        top_genre = genre_counts[0][0] if genre_counts else None
-        
-        artist_counts = Counter(artists).most_common(1)
-        top_artist = artist_counts[0][0] if artist_counts else None
-        
-        result_ids = {s.id for s in results}
-        
-        # Query for recommendations
-        rec_query = Song.query.filter(Song.id.notin_(result_ids))
-        
-        criteria = []
-        if top_genre:
-            criteria.append(Song.genre == top_genre)
-        if top_artist:
-            criteria.append(Song.artist == top_artist)
-            
-        if criteria:
-            rec_query = rec_query.filter(or_(*criteria))
-            
-        recommended_songs = rec_query.order_by(func.random()).limit(10).all()
-    else:
-        # Fallback if no results: random songs
-        recommended_songs = Song.query.order_by(func.random()).limit(10).all()
-
-    return jsonify({
-        "results": [fmt_song(s) for s in results],
-        "recommended": [fmt_song(s) for s in recommended_songs]
-    })
 
 
 @app.route("/songs/<int:song_id>/lyrics", methods=["POST"])
@@ -1731,9 +1719,16 @@ def update_lyrics(song_id):
 def stream_song(song_id):
     song = Song.query.get_or_404(song_id)
 
-    # Always redirect to R2 presigned URL (faster than local redirect chain)
+    # PROXY R2 AUDIO (Fixes CORS for Visualizer)
+    # Instead of redirecting (which preserves the browser's origin check), we stream the bytes.
     url = get_presigned_url(song.audio_file, "audio")
     if url:
+        if url.startswith("http"):
+            req = requests.get(url, stream=True)
+            return Response(
+                stream_with_context(req.iter_content(chunk_size=1024)),
+                content_type=req.headers.get('Content-Type', 'audio/mpeg')
+            )
         return redirect(url)
 
     # Fallback: serve local file
@@ -1817,7 +1812,8 @@ def get_playlist_songs(pid):
                 "title": s.title,
                 "artist": s.artist,
                 "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
-                "audio_url": get_presigned_url(s.audio_file, "audio") if s.audio_file else None
+                "audio_url": get_presigned_url(s.audio_file, "audio") if s.audio_file else None,
+                "lyrics": s.lyrics
             }
             for s in songs
         ]
