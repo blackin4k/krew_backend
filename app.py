@@ -799,16 +799,17 @@ def get_presigned_url(filename, folder):
     if filename.startswith("http"): return filename
     
     # 🚀 ACCELERATION: Use Public URL (No boto3 overhead, Cacheable)
-    if R2_PUBLIC_URL:
-        from urllib.parse import quote
-        # R2/S3 keys are case sensitive. Our folder structure is "audio/" and "covers/"
-        # Ensure we don't double up the folder if it's already in the filename (legacy data)
-        key = filename
-        if not key.startswith(f"{folder}/"):
-            key = f"{folder}/{filename}"
+    # DISABLED: Causing 401s because bucket might not be correctly public.
+    # if R2_PUBLIC_URL:
+    #     from urllib.parse import quote
+    #     # R2/S3 keys are case sensitive. Our folder structure is "audio/" and "covers/"
+    #     # Ensure we don't double up the folder if it's already in the filename (legacy data)
+    #     key = filename
+    #     if not key.startswith(f"{folder}/"):
+    #         key = f"{folder}/{filename}"
             
-        safe_key = quote(key)
-        return f"{R2_PUBLIC_URL}/{safe_key}"
+    #     safe_key = quote(key)
+    #     return f"{R2_PUBLIC_URL}/{safe_key}"
             
     # Fallback to slow presigned URL
     # Use hour as cache bucket - cache invalidates when hour changes
