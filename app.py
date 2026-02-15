@@ -841,34 +841,11 @@ def full_url(path):
 
 @app.route("/covers/<path:filename>")
 def cover(filename):
-    # PROXY R2 COVERS (Fixes CORS/Loading)
-    print(f"📷 PROXY COVER: {filename}") # DEBUG LOG
+    # REDIRECT to R2 (Offload traffic from backend)
+    # Proxying images was killing server threads and causing timeouts
+    # Browser will fetch from R2 directly with a signed URL
     url = get_presigned_url(filename, "covers")
     if url: 
-        if url.startswith("http"):
-            try:
-                req = requests.get(url, stream=True, timeout=5)
-                # Check status code!
-                if req.status_code != 200:
-                    print(f"❌ R2 Error for cover {filename}: {req.status_code}")
-                    return jsonify(error="R2 Fetch Failed"), 502
-
-                # Infer content type from filename or header
-                content_type = req.headers.get('Content-Type')
-                if not content_type:
-                    if filename.lower().endswith('.png'): content_type = 'image/png'
-                    elif filename.lower().endswith('.jpg') or filename.lower().endswith('.jpeg'): content_type = 'image/jpeg'
-                    elif filename.lower().endswith('.gif'): content_type = 'image/gif'
-                    else: content_type = 'image/jpeg' # Default
-
-                return Response(
-                    stream_with_context(req.iter_content(chunk_size=1024)),
-                    content_type=content_type
-                )
-            except Exception as e:
-                print(f"❌ Proxy Exception for cover {filename}: {e}")
-                return jsonify(error=str(e)), 500
-                
         return redirect(url)
     
     # Fallback
