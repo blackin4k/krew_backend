@@ -1252,7 +1252,7 @@ def browse_genres():
     )
 
     return jsonify([
-        {"genre": g, "count": c, "cover": cover}
+        {"genre": g, "count": c, "cover": full_url(f"/covers/{cover}") if cover else None}
         for g, c, cover in genres if g
     ])
 
@@ -1272,7 +1272,7 @@ def songs_by_genre(genre):
             "id": s.id,
             "title": s.title,
             "artist": s.artist,
-            "cover": s.cover_file
+            "cover": full_url(f"/covers/{s.cover_file}") if s.cover_file else None
         }
         for s in songs
     ])
@@ -1333,10 +1333,9 @@ def get_artist_details(name):
             "title": s.title or "Unknown Title",
             "artist": s.artist or "Unknown Artist",
             "album": s.album or "", 
-            "cover": s.cover_file or "", # GUARANTEE STRING
-            "url": full_url(f"/audio/{s.audio_file}") if s.audio_file else None,
+            "cover": full_url(f"/covers/{s.cover_file}") if s.cover_file else None, # Use Proxy
+            "url": full_url(f"/songs/{s.id}/stream"), # Use Proxy
             "genre": s.genre or "",
-            "lyrics": s.lyrics,
             "lyrics": s.lyrics
         }
         for s in songs
@@ -1376,8 +1375,8 @@ def get_songs():
             "id": s.id,
             "title": s.title,
             "artist": s.artist,
-            "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
-            "audio_url": get_presigned_url(s.audio_file, "audio") if s.audio_file else None,
+            "cover": full_url(f"/covers/{s.cover_file}") if s.cover_file else None,
+            "audio_url": full_url(f"/songs/{s.id}/stream"),
             "genre": s.genre,
             "lyrics": s.lyrics
         })
@@ -1435,8 +1434,8 @@ def search_songs():
             "id": s.id,
             "title": s.title,
             "artist": s.artist,
-            "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
-            "audio_url": get_presigned_url(s.audio_file, "audio") if s.audio_file else None,
+            "cover": full_url(f"/covers/{s.cover_file}") if s.cover_file else None,
+            "audio_url": full_url(f"/songs/{s.id}/stream"),
             "genre": s.genre,
             "lyrics": s.lyrics
         })
@@ -1459,7 +1458,7 @@ def song_landing_page(song_id):
     # Basic Metadata
     title = song.title
     artist = song.artist
-    cover_url = get_presigned_url(song.cover_file, "covers") or "https://kreewaux.xyz/logo.png"
+    cover_url = full_url(f"/covers/{song.cover_file}") if song.cover_file else "https://kreewaux.xyz/logo.png"
     
     # Simple HTML Landing Page
     html = f"""
