@@ -818,14 +818,25 @@ def get_presigned_url(filename, folder):
 
 @app.route("/covers/<path:filename>")
 def cover(filename):
-    # Redirect to R2 + Cache the Redirect!
-    # This prevents the app from hitting the backend for every scroll.
-    # Cache for 3000s (50 mins) to be safe within the 3600s URL expiry.
+    # PROXY R2 COVERS (Fixes CORS/Loading)
+    # Instead of redirecting to R2 (which might lack CORS or expire), we stream the bytes.
     url = get_presigned_url(filename, "covers")
     if url: 
-        resp = redirect(url)
-        resp.headers['Cache-Control'] = 'public, max-age=3000'
-        return resp
+        if url.startswith("http"):
+            req = requests.get(url, stream=True)
+            # Infer content type from filename or header
+            content_type = req.headers.get('Content-Type')
+            if not content_type:
+                if filename.lower().endswith('.png'): content_type = 'image/png'
+                elif filename.lower().endswith('.jpg') or filename.lower().endswith('.jpeg'): content_type = 'image/jpeg'
+                elif filename.lower().endswith('.gif'): content_type = 'image/gif'
+                else: content_type = 'image/jpeg' # Default
+
+            return Response(
+                stream_with_context(req.iter_content(chunk_size=1024)),
+                content_type=content_type
+            )
+        return redirect(url)
     
     # Fallback
     return send_file(os.path.join(COVER_DIR, filename))
