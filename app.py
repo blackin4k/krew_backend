@@ -816,34 +816,70 @@ def get_presigned_url(filename, folder):
     cache_bucket = int(time.time() // 3600)
     return _cached_presigned_url(filename, folder, cache_bucket)
 
+# =========================================================
+# HELPER: Generate Full URL (HTTPS Aware for Render)
+# =========================================================
+def full_url(path):
+    """
+    Generates a full URL for a given path, respecting X-Forwarded-Proto
+    to ensure HTTPS on Render/Production.
+    """
+    if not path.startswith("/"):
+        path = f"/{path}"
+        
+    # Check for Render/Proxy headers
+    scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
+    host = request.headers.get("Host", request.host)
+    
+    # Force HTTPS on production domains if not present
+    if "kreewaux.xyz" in host and scheme == "http":
+        scheme = "https"
+        
+    return f"{scheme}://{host}{path}"
+
+
 @app.route("/covers/<path:filename>")
 def cover(filename):
     # PROXY R2 COVERS (Fixes CORS/Loading)
-    # Instead of redirecting to R2 (which might lack CORS or expire), we stream the bytes.
+    print(f"📷 PROXY COVER: {filename}") # DEBUG LOG
     url = get_presigned_url(filename, "covers")
     if url: 
         if url.startswith("http"):
-            req = requests.get(url, stream=True)
-            # Infer content type from filename or header
-            content_type = req.headers.get('Content-Type')
-            if not content_type:
-                if filename.lower().endswith('.png'): content_type = 'image/png'
-                elif filename.lower().endswith('.jpg') or filename.lower().endswith('.jpeg'): content_type = 'image/jpeg'
-                elif filename.lower().endswith('.gif'): content_type = 'image/gif'
-                else: content_type = 'image/jpeg' # Default
+            try:
+                req = requests.get(url, stream=True, timeout=5)
+                # Check status code!
+                if req.status_code != 200:
+                    print(f"❌ R2 Error for cover {filename}: {req.status_code}")
+                    return jsonify(error="R2 Fetch Failed"), 502
 
-            return Response(
-                stream_with_context(req.iter_content(chunk_size=1024)),
-                content_type=content_type
-            )
+                # Infer content type from filename or header
+                content_type = req.headers.get('Content-Type')
+                if not content_type:
+                    if filename.lower().endswith('.png'): content_type = 'image/png'
+                    elif filename.lower().endswith('.jpg') or filename.lower().endswith('.jpeg'): content_type = 'image/jpeg'
+                    elif filename.lower().endswith('.gif'): content_type = 'image/gif'
+                    else: content_type = 'image/jpeg' # Default
+
+                return Response(
+                    stream_with_context(req.iter_content(chunk_size=1024)),
+                    content_type=content_type
+                )
+            except Exception as e:
+                print(f"❌ Proxy Exception for cover {filename}: {e}")
+                return jsonify(error=str(e)), 500
+                
         return redirect(url)
     
     # Fallback
+    print(f"⚠️ Cover not found in R2 Presign, checking local: {filename}")
     return send_file(os.path.join(COVER_DIR, filename))
+
 
 @app.route("/audio/<path:filename>")
 def serve_audio(filename):
     # Redirect to R2 + Cache
+    # NOTE: This endpoint directs to R2. 
+    # The /songs/<id>/stream endpoint uses the proxy.
     url = get_presigned_url(filename, "audio")
     if url: 
         resp = redirect(url)
@@ -1730,15 +1766,25 @@ def stream_song(song_id):
     song = Song.query.get_or_404(song_id)
 
     # PROXY R2 AUDIO (Fixes CORS for Visualizer)
-    # Instead of redirecting (which preserves the browser's origin check), we stream the bytes.
+    print(f"🎵 PROXY AUDIO: {song.title} ({song.audio_file})") # DEBUG LOG
     url = get_presigned_url(song.audio_file, "audio")
     if url:
         if url.startswith("http"):
-            req = requests.get(url, stream=True)
-            return Response(
-                stream_with_context(req.iter_content(chunk_size=1024)),
-                content_type=req.headers.get('Content-Type', 'audio/mpeg')
-            )
+            try:
+                req = requests.get(url, stream=True, timeout=10)
+                
+                if req.status_code != 200:
+                    print(f"❌ R2 Error for audio {song.audio_file}: {req.status_code}")
+                    return jsonify(error="Audio Fetch Failed"), 502
+
+                return Response(
+                    stream_with_context(req.iter_content(chunk_size=4096)), # Larger chunk for audio
+                    content_type=req.headers.get('Content-Type', 'audio/mpeg')
+                )
+            except Exception as e:
+                print(f"❌ Proxy Exception for audio {song.audio_file}: {e}")
+                return jsonify(error=str(e)), 500
+
         return redirect(url)
 
     # Fallback: serve local file
