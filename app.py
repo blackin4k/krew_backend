@@ -2572,23 +2572,17 @@ def get_sleep_timer():
 @app.route("/search", methods=["GET"])
 def search():
     query = request.args.get("q", "").strip()
-    if not query:
-        return jsonify([])
+    genre_filter = request.args.get("genre")
+    
+    if not query and not genre_filter:
+        return jsonify({"results": [], "top_match": None})
 
-    # Weighted Search
-    # 1. Exact Title Match
-    # 2. Title Starts With
-    # 3. Artist Match
-    # 4. Lyrics Match (if available)
-    
-    # We fetch more and filter in Python for complex weighting if DB is simple sqlite/postgres mix
-    # But SQL `LikE` is efficient enough for now.
-    
     results = []
     seen_ids = set()
 
     # Helper to add unique
-    def add_songs(songs_list, origin):
+    def add_songs(songs_list, match_type):
+        added_count = 0
         for s in songs_list:
             if s.id not in seen_ids:
                 results.append({
@@ -2597,27 +2591,85 @@ def search():
                     "artist": s.artist,
                     "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
                     "audio": get_presigned_url(s.audio_file, "audio") if s.audio_file else None,
-                    "match_type": origin
+                    "match_type": match_type
                 })
                 seen_ids.add(s.id)
+                added_count += 1
+        return added_count
 
-    # 1. Exact/Close Title
-    exact = Song.query.filter(Song.title.ilike(f"{query}%")).limit(10).all()
-    add_songs(exact, "title_exact")
+    # 0. Genre Filter (if generic browse)
+    if genre_filter:
+        genre_matches = Song.query.filter(Song.genre == genre_filter).order_by(func.random()).limit(20).all()
+        add_songs(genre_matches, "genre")
+        return jsonify({"results": results, "top_match": None})
 
-    # 2. Artist
-    artist_matches = Song.query.filter(Song.artist.ilike(f"%{query}%")).limit(10).all()
-    add_songs(artist_matches, "artist")
+    # WEIGHTED SEARCH LOGIC
+    
+    # 1. Exact Title Match (Highest Priority)
+    exact_title = Song.query.filter(Song.title.ilike(f"{query}")).all()
+    add_songs(exact_title, "exact_title")
 
-    # 3. Lyrics (Broad search)
-    # Check if lyrics column exists first (it should based on models)
-    try:
-        lyrics_matches = Song.query.filter(Song.lyrics.ilike(f"%{query}%")).limit(5).all()
-        add_songs(lyrics_matches, "lyrics")
-    except:
-        pass # Lyrics column might be missing in some DB states
+    # 2. Exact Artist Match
+    exact_artist = Song.query.filter(Song.artist.ilike(f"{query}")).all()
+    add_songs(exact_artist, "exact_artist")
+    
+    # 3. Starts With Title
+    starts_title = Song.query.filter(Song.title.ilike(f"{query}%")).limit(5).all()
+    add_songs(starts_title, "starts_title")
 
-    return jsonify(results)
+    # 4. Partial Title
+    partial_title = Song.query.filter(Song.title.ilike(f"%{query}%")).limit(10).all()
+    add_songs(partial_title, "partial_title")
+    
+    # 5. Partial Artist
+    partial_artist = Song.query.filter(Song.artist.ilike(f"%{query}%")).limit(10).all()
+    add_songs(partial_artist, "partial_artist")
+
+    # EXTRACT TOP MATCH
+    # The first result in our prioritized list is the "Top Match"
+    top_match = results[0] if results else None
+    
+    # If we have a top match, remove it from the main list so it doesn't duplicate visually
+    # OR keep it if frontend handles it. Let's keep distinct.
+    main_results = results[1:] if results else []
+
+    return jsonify({
+        "top_match": top_match,
+        "results": main_results
+    })
+
+
+@app.route("/search/trending", methods=["GET"])
+def search_trending():
+    # Trending = Most played in last 24h
+    now = datetime.utcnow()
+    yesterday = now - timedelta(days=1)
+    
+    trending_raw = (
+        db.session.query(Song, func.count(PlayLog.id).label("plays"))
+        .join(PlayLog, PlayLog.song_id == Song.id)
+        .filter(PlayLog.played_at >= yesterday)
+        .group_by(Song.id)
+        .order_by(desc("plays"))
+        .limit(10)
+        .all()
+    )
+    
+    # Fallback to random popular if no data
+    if not trending_raw:
+        trending = Song.query.order_by(func.random()).limit(6).all()
+    else:
+        trending = [s for s, _ in trending_raw]
+
+    return jsonify([
+        {
+            "id": s.id,
+            "title": s.title,
+            "artist": s.artist,
+            "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None
+        }
+        for s in trending
+    ])
 
 
 @app.route("/artists/<artist_name>")
@@ -2783,6 +2835,23 @@ def autoplay_fill(state):
         .all()
     )
 
+    # 1.5 Try: BPM Match (Vibe) - if current song has BPM
+    if len(related) < 10 and last_song.bpm:
+        # +/- 10 BPM range
+        bpm_range = 10
+        bpm_songs = (
+            Song.query
+            .filter(
+                Song.bpm.between(last_song.bpm - bpm_range, last_song.bpm + bpm_range),
+                Song.id.notin_(existing_ids),
+                ~Song.id.in_([s.id for s in related])
+            )
+            .order_by(func.random())
+            .limit(10 - len(related))
+            .all()
+        )
+        related.extend(bpm_songs)
+
     # 2. Try: Same Genre (if shortage)
     valid_genre = last_song.genre and last_song.genre.lower() not in ['unknown', 'import', 'other', 'single', 'undefined']
     
@@ -2854,7 +2923,69 @@ def player_queue_add():
         state.shuffled_queue = json.dumps(shuffled)
 
     db.session.commit()
-    return jsonify(msg="Added to queue")
+@app.route("/player/queue/modify", methods=["POST"])
+@jwt_required()
+def player_queue_modify():
+    user_id = int(get_jwt_identity())
+    data = request.json or {}
+    action = data.get("action")
+    
+    state = get_player(user_id)
+    if not state.original_queue:
+        return jsonify(msg="Queue empty or error"), 400
+        
+    queue = json.loads(state.original_queue)
+    
+    if action == "remove":
+        # Remove specific song IDs
+        to_remove = set(data.get("song_ids", []))
+        queue = [sid for sid in queue if sid not in to_remove]
+        
+    elif action == "play_next":
+        # Move song to front (after current)
+        song_id = data.get("song_id")
+        if song_id:
+             # If already in queue, remove it
+             if song_id in queue:
+                 queue.remove(song_id)
+             # Insert at front (index 0)
+             queue.insert(0, song_id)
+             
+    elif action == "clear":
+        queue = []
+        
+    elif action == "reorder":
+        # Set queue to exact new order
+        new_order = data.get("song_ids", [])
+        if new_order:
+            # Validate: ensure we only reorder existing songs to avoid corruption?
+            # Or trust client? Validating is safer.
+            current_set = set(queue)
+            valid_new_order = [sid for sid in new_order if sid in current_set]
+            
+            # If client sends partial list, we might lose songs. 
+            # Strategy: Take new order, append any remaining songs that were in queue but not in new order
+            # (unless intent is to replace? "reorder" usually implies just shuffling existing)
+            
+            new_set = set(valid_new_order)
+            leftovers = [sid for sid in queue if sid not in new_set]
+            
+            queue = valid_new_order + leftovers
+            
+    else:
+        return jsonify(error="Invalid action"), 400
+
+    state.original_queue = json.dumps(queue)
+    
+    # Sync shuffle if needed (reset shuffle to match or try to preserve?)
+    # For now, if modified, let's just reset shuffled queue or re-shuffle
+    if state.shuffle:
+         shuffled = queue[:]
+         random.shuffle(shuffled)
+         state.shuffled_queue = json.dumps(shuffled)
+
+    db.session.commit()
+    return jsonify(msg="Queue updated", queue=queue)
 
 
 
@@ -2867,27 +2998,185 @@ def get_recent_tracks():
 
     # Batch fetch all songs to avoid N+1 query
     song_ids = [log.song_id for log in logs]
-    songs_map = {s.id: s for s in Song.query.filter(Song.id.in_(song_ids)).all()}
-
-    seen = set()
-    unique_songs = []
+    songs = {s.id: s for s in Song.query.filter(Song.id.in_(song_ids)).all()}
     
+    # Return unique songs in order of play
+    unique_songs = []
+    seen = set()
     for log in logs:
-        if log.song_id not in seen and log.song_id in songs_map:
-            s = songs_map[log.song_id]
-            seen.add(log.song_id)
+        if log.song_id not in seen and log.song_id in songs:
+            s = songs[log.song_id]
             unique_songs.append({
                 "id": s.id,
                 "title": s.title,
                 "artist": s.artist,
-                "album": s.album,
-                "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
-                "audio_url": get_presigned_url(s.audio_file, "audio") if s.audio_file else None
+                "cover": full_url(f"/covers/{s.cover_file}") if s.cover_file else None,
+                "audio": full_url(f"/songs/{s.id}/stream")
             })
-            if len(unique_songs) >= 20:
-                break
-
+            seen.add(log.song_id)
+            
     return jsonify(unique_songs)
+
+@app.route("/me/streak")
+@jwt_required()
+def get_user_streak():
+    user_id = int(get_jwt_identity())
+    
+    # 1. Calculate Streak (Consecutive days)
+    # Get all unique dates played sorted desc
+    dates_raw = (
+        db.session.query(func.date(PlayLog.played_at))
+        .filter(PlayLog.user_id == user_id)
+        .group_by(func.date(PlayLog.played_at))
+        .order_by(desc(func.date(PlayLog.played_at)))
+        .all()
+    )
+    
+    # Convert to set of strings/dates
+    dates = [d[0] for d in dates_raw] # query returns list of tuples
+    
+    streak = 0
+    today = datetime.utcnow().date()
+    yesterday = today - timedelta(days=1)
+    
+    # Logic: If played today, streak starts from today. If not played today but played yesterday, starts yesterday.
+    # If neither, streak is 0.
+    
+    if not dates:
+        streak = 0
+    else:
+        # Check if most recent is today or yesterday
+        last_play = dates[0] # date object or string? SQLAlchemy func.date usually returns date
+        if isinstance(last_play, str):
+            last_play = datetime.strptime(last_play, "%Y-%m-%d").date()
+            
+        if last_play == today:
+            streak = 1
+            current_check = yesterday
+            idx = 1
+        elif last_play == yesterday:
+            streak = 1
+            current_check = yesterday - timedelta(days=1)
+            idx = 1
+        else:
+            streak = 0
+            current_check = None # Break
+            
+        # Count backwards
+        if streak > 0:
+            while idx < len(dates):
+                prev_date = dates[idx]
+                if isinstance(prev_date, str):
+                     prev_date = datetime.strptime(prev_date, "%Y-%m-%d").date()
+                     
+                if prev_date == current_check:
+                    streak += 1
+                    current_check = current_check - timedelta(days=1)
+                elif prev_date > current_check:
+                    # Duplicate date (shouldn't happen due to group_by)
+                    pass 
+                else:
+                    # Gap found
+                    break
+                idx += 1
+
+    # 2. Minutes Listened Today
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    minutes_query = (
+        db.session.query(func.sum(PlayLog.listen_duration))
+        .filter(PlayLog.user_id == user_id, PlayLog.played_at >= today_start)
+        .scalar()
+    )
+    minutes_today = int((minutes_query or 0) / 60)
+    
+    # 3. Top Genre (Last 7 Days)
+    week_start = today_start - timedelta(days=7)
+    top_genre_raw = (
+        db.session.query(Song.genre, func.count(PlayLog.id).label("count"))
+        .join(PlayLog, PlayLog.song_id == Song.id)
+        .filter(PlayLog.user_id == user_id, PlayLog.played_at >= week_start)
+        .group_by(Song.genre)
+        .order_by(desc("count"))
+        .first()
+    )
+    top_genre = top_genre_raw[0] if top_genre_raw else "Unknown"
+    
+    return jsonify({
+        "streak_days": streak,
+        "minutes_today": minutes_today,
+        "top_genre": top_genre
+    })
+
+@app.route("/songs/<int:sid>/played", methods=["POST"])
+@jwt_required()
+def log_play_duration(sid):
+    user_id = int(get_jwt_identity())
+    data = request.json or {}
+    duration = data.get("duration", 0) # in seconds
+    
+    # Check for recent log (created by /player/play within last 20 mins) 
+    # to update duration instead of duplicate
+    cutoff = datetime.utcnow() - timedelta(minutes=20)
+    
+    recent_log = (
+        PlayLog.query
+        .filter(PlayLog.user_id == user_id, PlayLog.song_id == sid, PlayLog.played_at >= cutoff)
+        .order_by(PlayLog.played_at.desc())
+        .first()
+    )
+    
+    if recent_log:
+        # Update existing
+        # Aggregate duration? If user played same song twice?
+        # Ideally, valid duration replaces 0. If > 0, maybe add?
+        if recent_log.listen_duration == 0:
+             recent_log.listen_duration = duration
+        else:
+            # Create NEW log if previous one already has duration (implies handled)
+             new_log = PlayLog(user_id=user_id, song_id=sid, listen_duration=duration)
+             db.session.add(new_log)
+    else:
+        # No recent log, create new
+        new_log = PlayLog(user_id=user_id, song_id=sid, listen_duration=duration)
+        db.session.add(new_log)
+        
+    db.session.commit()
+    return jsonify(msg="Logged", duration=duration)
+
+@app.route("/browse/genres")
+def browse_genres():
+    # Return unique genres with a count and a representative cover
+    # We want genres with > 0 songs
+    
+    # Subquery to get one cover per genre (random or first)
+    # SQLite/Postgres syntax for "first" or "random" differs slightly.
+    # robust approach: Get counts, then fetch one cover for each genre.
+    
+    genre_counts = (
+        db.session.query(Song.genre, func.count(Song.id))
+        .group_by(Song.genre)
+        .all()
+    )
+    
+    results = []
+    # If too many genres, this loop is slow (N+1). 
+    # But usually genres < 50.
+    for genre, count in genre_counts:
+        if not genre or genre.lower() == "unknown": continue
+        
+        # Get random cover
+        song = Song.query.filter_by(genre=genre).filter(Song.cover_file != None).first()
+        cover = full_url(f"/covers/{song.cover_file}") if song and song.cover_file else None
+        
+        results.append({
+            "genre": genre,
+            "count": count,
+            "cover": cover
+        })
+        
+    # Sort by count desc
+    results.sort(key=lambda x: x['count'], reverse=True)
+    return jsonify(results)
 # =========================================================
 # RADIO   SONG-RADIO   ARTIST-RADIO  ALBUM-RADIO / BECAUSE YOU LISTENED 
 # ========================================================
