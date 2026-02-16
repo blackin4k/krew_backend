@@ -2733,7 +2733,8 @@ def player_queue():
         {
             "id": songs[sid].id,
             "title": songs[sid].title,
-            "artist": songs[sid].artist
+            "artist": songs[sid].artist,
+            "cover": full_url(f"/covers/{songs[sid].cover_file}") if songs[sid].cover_file else None
         }
         for sid in queue if sid in songs
     ]
@@ -4005,6 +4006,91 @@ def get_recent():
         }
         for log, s in logs
     ])
+
+# 2. Get User Streak & Stats
+@app.route("/me/streak")
+@jwt_required()
+def get_streak_stats():
+    user_id = int(get_jwt_identity())
+    now = datetime.utcnow()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    # 1. Minutes Played Today
+    # Sum listen_duration for plays today
+    todays_play_time = (
+        db.session.query(func.sum(PlayLog.listen_duration))
+        .filter(PlayLog.user_id == user_id)
+        .filter(PlayLog.played_at >= today_start)
+        .scalar()
+    ) or 0
+    minutes_today = int(todays_play_time / 60)
+
+    # 2. Top Genre (Last 7 Days)
+    week_start = today_start - timedelta(days=7)
+    top_genre_entry = (
+        db.session.query(Song.genre, func.count(PlayLog.id).label("count"))
+        .join(PlayLog, PlayLog.song_id == Song.id)
+        .filter(PlayLog.user_id == user_id)
+        .filter(PlayLog.played_at >= week_start)
+        .filter(Song.genre != None)
+        .filter(Song.genre != "Unknown")
+        .group_by(Song.genre)
+        .order_by(desc("count"))
+        .first()
+    )
+    top_genre = top_genre_entry[0] if top_genre_entry else "Music"
+
+    # 3. Calculate Streak (Consecutive Days Active)
+    # Get all distinct dates user played music, ordered desc
+    # SQLite 'date()' function might differ from Postgres. verify usage.
+    # For compatibility, we fetch dates and process in python (safer for small-med scale)
+    
+    # Efficient enough: Fetch distinct dates from last 365 days
+    year_start = today_start - timedelta(days=365)
+    
+    # SQLAlchemy logic for "date(played_at)"
+    # SQL: SELECT DISTINCT date(played_at) FROM play_logs WHERE ...
+    # This varies by DB. 
+    # Let's just fetch all 'played_at' for the user in last month/year and compute set in python
+    # To be safe against massive logs, just selecting dates is better but we might have many logs.
+    # Let's try to group by date in SQL if possible, but fallback to python for safety across SQLite/PG.
+    
+    logs = (
+        db.session.query(PlayLog.played_at)
+        .filter(PlayLog.user_id == user_id)
+        .filter(PlayLog.played_at >= year_start)
+        .order_by(PlayLog.played_at.desc())
+        .all()
+    )
+    
+    active_dates = {log.played_at.date() for log in logs}
+    
+    streak = 0
+    check_date = now.date()
+    
+    # If played today, streak starts today. If not, check yesterday.
+    if check_date not in active_dates:
+        check_date = check_date - timedelta(days=1)
+        if check_date not in active_dates:
+             # Streak broken or 0
+             pass
+        else:
+             streak = 1
+             check_date = check_date - timedelta(days=1)
+    else:
+        streak = 1
+        check_date = check_date - timedelta(days=1)
+
+    # Count backwards
+    while check_date in active_dates:
+        streak += 1
+        check_date = check_date - timedelta(days=1)
+
+    return jsonify({
+        "streak_days": streak,
+        "minutes_today": minutes_today,
+        "top_genre": top_genre
+    })
 
 # 3. Capsule Stats
 @app.route("/capsule/stats")
