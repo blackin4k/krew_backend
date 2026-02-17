@@ -3143,40 +3143,7 @@ def log_play_duration(sid):
     db.session.commit()
     return jsonify(msg="Logged", duration=duration)
 
-@app.route("/browse/genres")
-def browse_genres():
-    # Return unique genres with a count and a representative cover
-    # We want genres with > 0 songs
-    
-    # Subquery to get one cover per genre (random or first)
-    # SQLite/Postgres syntax for "first" or "random" differs slightly.
-    # robust approach: Get counts, then fetch one cover for each genre.
-    
-    genre_counts = (
-        db.session.query(Song.genre, func.count(Song.id))
-        .group_by(Song.genre)
-        .all()
-    )
-    
-    results = []
-    # If too many genres, this loop is slow (N+1). 
-    # But usually genres < 50.
-    for genre, count in genre_counts:
-        if not genre or genre.lower() == "unknown": continue
-        
-        # Get random cover
-        song = Song.query.filter_by(genre=genre).filter(Song.cover_file != None).first()
-        cover = full_url(f"/covers/{song.cover_file}") if song and song.cover_file else None
-        
-        results.append({
-            "genre": genre,
-            "count": count,
-            "cover": cover
-        })
-        
-    # Sort by count desc
-    results.sort(key=lambda x: x['count'], reverse=True)
-    return jsonify(results)
+
 # =========================================================
 # RADIO   SONG-RADIO   ARTIST-RADIO  ALBUM-RADIO / BECAUSE YOU LISTENED 
 # ========================================================
