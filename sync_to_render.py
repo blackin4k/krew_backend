@@ -6,7 +6,7 @@ import os
 # CONFIGURATION
 LOCAL_DB = "instance/db.sqlite3"
 # Using the External URL from your render-krew-db.txt
-REMOTE_DB_URL = "postgresql://krew_db_user:WXMteDgjBiceQO2On6GRDOXow3ZWaAIE@dpg-d5pb8aer433s73d713jg-a.singapore-postgres.render.com/krew_db"
+REMOTE_DB_URL = "postgresql://postgres.jizmyglvxuczdfxfkmul:falakdarealart@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres"
 
 def sync_songs():
     print("Connecting to local database...")

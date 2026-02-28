@@ -7,7 +7,7 @@ from pathlib import Path
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Config
-DB_URL = "postgresql://krew_db_user:WXMteDgjBiceQO2On6GRDOXow3ZWaAIE@dpg-d5pb8aer433s73d713jg-a.singapore-postgres.render.com/krew_db"
+DB_URL = "postgresql://postgres.jizmyglvxuczdfxfkmul:falakdarealart@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres"
 R2_ENDPOINT_URL = "https://5e22fa30a7744b769bea5ad23240ed75.r2.cloudflarestorage.com"
 R2_ACCESS_KEY_ID = "da67313054174317af24874313f88f00"
 R2_SECRET_ACCESS_KEY = "80f1e7123aa24b22c7a40bce3f619e09968a35cc988fdcae6dec24d86891eb8f"

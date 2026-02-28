@@ -6,7 +6,7 @@ from sqlalchemy import create_engine, text
 # Default to the URL from sync_to_render.py if not provided
 # Note: Users should ideally provide this via Env Var, but we have it hardcoded in sync_to_render.py
 # which implies it's semi-public or at least accessible to the dev.
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://krew_db_user:WXMteDgjBiceQO2On6GRDOXow3ZWaAIE@dpg-d5pb8aer433s73d713jg-a.singapore-postgres.render.com/krew_db")
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres.jizmyglvxuczdfxfkmul:falakdarealart@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres")
 
 def migrate():
     print(f"🔌 Connecting to database...")

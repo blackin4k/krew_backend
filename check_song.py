@@ -3,7 +3,7 @@ import psycopg2
 import sys
 
 # Render Database URL
-DATABASE_URL = "postgresql://krew_db_user:WXMteDgjBiceQO2On6GRDOXow3ZWaAIE@dpg-d5pb8aer433s73d713jg-a.singapore-postgres.render.com/krew_db"
+DATABASE_URL = "postgresql://postgres.jizmyglvxuczdfxfkmul:falakdarealart@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres"
 
 def check_song(filename_fragment):
     print(f"🔍 Searching for songs containing '{filename_fragment}' in Render DB...")

@@ -4,7 +4,7 @@ import os
 
 # Render Database URL (Hardcoded for your convenience based on previous context)
 # If this changed, please update it.
-DATABASE_URL = "postgresql://krew_db_user:WXMteDgjBiceQO2On6GRDOXow3ZWaAIE@dpg-d5pb8aer433s73d713jg-a.singapore-postgres.render.com/krew_db"
+DATABASE_URL = "postgresql://postgres.jizmyglvxuczdfxfkmul:falakdarealart@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres"
 
 def fix_sequence():
     print("🔌 Connecting to Render Database...")
