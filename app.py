@@ -4704,17 +4704,6 @@ def song_stats(song_id):
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
-        # Auto-import songs on startup
-        try:
-            auto_import_songs()
-        except Exception as e:
-            print(f"Auto-import failed: {e}")
-            
-        # Sync with R2 (Production)
-        try:
-            sync_r2_songs()
-        except Exception as e:
-            print(f"R2 Sync failed: {e}")
         # Auto-migration for cover_file
         try:
             from sqlalchemy import text
@@ -4760,6 +4749,19 @@ if __name__ == "__main__":
             print("Auto-migrated: Added audio_hash to song")
         except Exception:
             pass
+            
+        # Auto-import songs on startup
+        try:
+            auto_import_songs()
+        except Exception as e:
+            print(f"Auto-import failed: {e}")
+            
+        # Sync with R2 (Production)
+        try:
+            sync_r2_songs()
+        except Exception as e:
+            print(f"R2 Sync failed: {e}")
+
 
 
     socketio.run(app, debug=True, host="0.0.0.0", port=5000)
@@ -4770,12 +4772,6 @@ if __name__ == "__main__":
 else:
     # This block runs when imported (e.g. by gunicorn)
     with app.app_context():
-        try:
-            print("🚀 Gunicorn startup: Syncing R2...")
-            sync_r2_songs()
-        except Exception as e:
-            print(f"Startup Sync Error: {e}")
-            
         # Auto-migration for Song upgrades (Gunicorn/Render Production)
         try:
             from sqlalchemy import text
@@ -4800,3 +4796,9 @@ else:
             print("Auto-migrated (Prod): Added audio_hash to song")
         except Exception:
             pass
+            
+        try:
+            print("🚀 Gunicorn startup: Syncing R2...")
+            sync_r2_songs()
+        except Exception as e:
+            print(f"Startup Sync Error: {e}")
