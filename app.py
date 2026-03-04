@@ -1749,16 +1749,36 @@ def stream_song(song_id):
     if url:
         if url.startswith("http"):
             try:
-                req = requests.get(url, stream=True, timeout=10)
+                headers = {}
+                range_header = request.headers.get("Range", None)
+                if range_header:
+                    headers['Range'] = range_header
+
+                req = requests.get(url, headers=headers, stream=True, timeout=10)
                 
-                if req.status_code != 200:
+                if req.status_code not in [200, 206]:
                     print(f"❌ R2 Error for audio {song.audio_file}: {req.status_code}")
                     return jsonify(error="Audio Fetch Failed"), 502
 
-                return Response(
+                resp = Response(
                     stream_with_context(req.iter_content(chunk_size=4096)), # Larger chunk for audio
-                    content_type=req.headers.get('Content-Type', 'audio/mpeg')
+                    content_type=req.headers.get('Content-Type', 'audio/mpeg'),
+                    status=req.status_code
                 )
+                
+                # Forward range headers back to the client
+                if 'Content-Range' in req.headers:
+                    resp.headers['Content-Range'] = req.headers['Content-Range']
+                if 'Accept-Ranges' in req.headers:
+                    resp.headers['Accept-Ranges'] = req.headers['Accept-Ranges']
+                if 'Content-Length' in req.headers:
+                    resp.headers['Content-Length'] = req.headers['Content-Length']
+                
+                # Ensure Accept-Ranges is always present so clients know they can seek
+                if 'Accept-Ranges' not in resp.headers:
+                    resp.headers['Accept-Ranges'] = 'bytes'
+
+                return resp
             except Exception as e:
                 print(f"❌ Proxy Exception for audio {song.audio_file}: {e}")
                 return jsonify(error=str(e)), 500
