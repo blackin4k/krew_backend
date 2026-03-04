@@ -959,11 +959,16 @@ class Song(db.Model):
     uploaded_by = db.Column(db.Integer)
     genre = db.Column(db.String(50), default="Unknown", index=True)
     lyrics = db.Column(db.Text, nullable=True)
+    
+    # New columns for analytics and duplication check
+    duration = db.Column(db.Integer, default=0)
+    play_count = db.Column(db.Integer, default=0)
+    audio_hash = db.Column(db.String(64), index=True)
 
 
 class ExternalPlaylistTrack(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    playlist_id = db.Column(db.Integer)
+    playlist_id = db.Column(db.Integer, db.ForeignKey('playlist.id'))
     title = db.Column(db.String(200))
     artist = db.Column(db.String(200))
     available = db.Column(db.Boolean, default=False)
@@ -977,15 +982,15 @@ class ExternalPlaylistTrack(db.Model):
 class Playlist(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(200))
-    owner_id = db.Column(db.Integer)
+    owner_id = db.Column(db.Integer, db.ForeignKey('user.id'))
     position = db.Column(db.Integer)
     cover_file = db.Column(db.String(255))
 
 
 class PlaylistSong(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    playlist_id = db.Column(db.Integer)
-    song_id = db.Column(db.Integer)
+    playlist_id = db.Column(db.Integer, db.ForeignKey('playlist.id'))
+    song_id = db.Column(db.Integer, db.ForeignKey('song.id'))
 
 
 
@@ -1020,8 +1025,8 @@ class Artist(db.Model):
 
 class Like(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer)
-    song_id = db.Column(db.Integer)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"))
+    song_id = db.Column(db.Integer, db.ForeignKey("song.id"))
 
 
 class Jam(db.Model):
@@ -3978,6 +3983,28 @@ if __name__ == "__main__":
         except Exception:
             pass
 
+        # Auto-migration for Song upgrades
+        try:
+            db.session.execute(text("ALTER TABLE song ADD COLUMN duration INTEGER DEFAULT 0"))
+            db.session.commit()
+            print("Auto-migrated: Added duration to song")
+        except Exception:
+            pass
+
+        try:
+            db.session.execute(text("ALTER TABLE song ADD COLUMN play_count INTEGER DEFAULT 0"))
+            db.session.commit()
+            print("Auto-migrated: Added play_count to song")
+        except Exception:
+            pass
+
+        try:
+            db.session.execute(text("ALTER TABLE song ADD COLUMN audio_hash VARCHAR(64)"))
+            db.session.commit()
+            print("Auto-migrated: Added audio_hash to song")
+        except Exception:
+            pass
+
     socketio.run(app, debug=True, host="0.0.0.0", port=5000)
 
 # =========================================================
@@ -4712,6 +4739,28 @@ if __name__ == "__main__":
         except Exception:
             pass
 
+        # Auto-migration for Song upgrades
+        try:
+            db.session.execute(text("ALTER TABLE song ADD COLUMN duration INTEGER DEFAULT 0"))
+            db.session.commit()
+            print("Auto-migrated: Added duration to song")
+        except Exception:
+            pass
+
+        try:
+            db.session.execute(text("ALTER TABLE song ADD COLUMN play_count INTEGER DEFAULT 0"))
+            db.session.commit()
+            print("Auto-migrated: Added play_count to song")
+        except Exception:
+            pass
+
+        try:
+            db.session.execute(text("ALTER TABLE song ADD COLUMN audio_hash VARCHAR(64)"))
+            db.session.commit()
+            print("Auto-migrated: Added audio_hash to song")
+        except Exception:
+            pass
+
 
     socketio.run(app, debug=True, host="0.0.0.0", port=5000)
 
@@ -4726,3 +4775,28 @@ else:
             sync_r2_songs()
         except Exception as e:
             print(f"Startup Sync Error: {e}")
+            
+        # Auto-migration for Song upgrades (Gunicorn/Render Production)
+        try:
+            from sqlalchemy import text
+            db.session.execute(text("ALTER TABLE song ADD COLUMN duration INTEGER DEFAULT 0"))
+            db.session.commit()
+            print("Auto-migrated (Prod): Added duration to song")
+        except Exception:
+            pass
+
+        try:
+            from sqlalchemy import text
+            db.session.execute(text("ALTER TABLE song ADD COLUMN play_count INTEGER DEFAULT 0"))
+            db.session.commit()
+            print("Auto-migrated (Prod): Added play_count to song")
+        except Exception:
+            pass
+
+        try:
+            from sqlalchemy import text
+            db.session.execute(text("ALTER TABLE song ADD COLUMN audio_hash VARCHAR(64)"))
+            db.session.commit()
+            print("Auto-migrated (Prod): Added audio_hash to song")
+        except Exception:
+            pass
