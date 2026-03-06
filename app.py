@@ -90,6 +90,7 @@ app.config["JWT_ACCESS_TOKEN_EXPIRES"] = 604800  # 7 days in seconds
 
 app.config["UPLOAD_AUDIO"] = AUDIO_DIR
 app.config["UPLOAD_COVER"] = COVER_DIR
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MiB upload limit
 
 @app.route("/ping_top")
 def ping_top():
@@ -151,8 +152,19 @@ def upload_to_r2(local_path, r2_path):
         print(f"❌ R2 Upload Failed: {e}")
         return False
 
+def background_sync(audio_path, r2_audio_key, cover_path, r2_cover_key):
+    try:
+        if audio_path:
+            upload_to_r2(audio_path, r2_audio_key)
+        if cover_path:
+            upload_to_r2(cover_path, r2_cover_key)
+        sync_songs()
+    except Exception as e:
+        print(f"❌ Background Sync Failed: {e}")
+
 @app.route("/songs/upload", methods=["POST"])
 @jwt_required()
+@limiter.limit("20 per day")
 def upload_song():
     try:
         user_id = int(get_jwt_identity())
@@ -180,7 +192,14 @@ def upload_song():
             unique_id = str(uuid.uuid4())[:8]
             filename = f"{unique_id}_{filename}"
             
-            file.save(os.path.join(app.config['UPLOAD_AUDIO'], filename))
+            audio_path = os.path.join(app.config['UPLOAD_AUDIO'], filename)
+            file.save(audio_path)
+
+            audio_hash = get_audio_hash(audio_path)
+            existing = Song.query.filter_by(audio_hash=audio_hash).first()
+            if existing:
+                os.remove(audio_path)
+                return jsonify(error="Duplicate song (same audio content)"), 409
 
             cover_filename = None
             if cover and allowed_file(cover.filename, ALLOWED_EXTENSIONS_COVER):
@@ -210,27 +229,23 @@ def upload_song():
                 cover_file=cover_filename,
                 genre=final_genre,
                 lyrics=lyrics,
-                uploaded_by=user.id 
+                uploaded_by=user.id,
+                audio_hash=audio_hash
             )
             
             db.session.add(new_song)
             db.session.commit()
 
             # --- AUTO-SYNC TO PROD ---
-            # (In a real app, maybe offset this to a worker, but keeping it simple)
-            try:
-                # 1. Upload to R2
-                audio_path = os.path.join(app.config['UPLOAD_AUDIO'], filename)
-                upload_to_r2(audio_path, f"audio/{filename}")
-                if cover_filename:
-                    cover_path = os.path.join(app.config['UPLOAD_COVER'], cover_filename)
-                    upload_to_r2(cover_path, f"covers/{cover_filename}")
-
-                # 2. Sync Database
-                sync_songs()
-            except Exception as e:
-                print(f"❌ Sync Warning: {e}")
-                # Don't fail the request if sync fails, just log it
+            # Offloaded to a background thread for performance
+            audio_path = os.path.join(app.config['UPLOAD_AUDIO'], filename)
+            cover_path = os.path.join(app.config['UPLOAD_COVER'], cover_filename) if cover_filename else None
+            
+            threading.Thread(
+                target=background_sync, 
+                args=(audio_path, f"audio/{filename}", cover_path, f"covers/{cover_filename}" if cover_filename else None),
+                daemon=True
+            ).start()
 
             return jsonify({
                 "msg": "Song uploaded successfully!", 
@@ -246,11 +261,11 @@ def upload_song():
         return jsonify(error=str(e)), 500
 
 @app.route("/admin/upload", methods=["POST"])
+@limiter.limit("50 per day")
 def admin_upload_song():
-    # Simple Security Check (Replace "krew_admin_secret" with a real env var in prod)
     admin_secret = request.headers.get("X-Admin-Secret")
-    if admin_secret != os.environ.get("ADMIN_SECRET", "krew_dev_admin_123"):
-        return jsonify(error="Unauthorized"), 401
+    if not admin_secret or admin_secret != os.environ.get("ADMIN_SECRET"):
+        return jsonify(error="Unauthorized"), 403
 
 
     if 'audio' not in request.files:
@@ -273,7 +288,14 @@ def admin_upload_song():
         unique_id = str(uuid.uuid4())[:8]
         filename = f"{unique_id}_{filename}"
         
-        file.save(os.path.join(app.config['UPLOAD_AUDIO'], filename))
+        audio_path = os.path.join(app.config['UPLOAD_AUDIO'], filename)
+        file.save(audio_path)
+
+        audio_hash = get_audio_hash(audio_path)
+        existing = Song.query.filter_by(audio_hash=audio_hash).first()
+        if existing:
+            os.remove(audio_path)
+            return jsonify(error="Duplicate song (same audio content)"), 409
 
         cover_filename = None
         if cover and allowed_file(cover.filename, ALLOWED_EXTENSIONS_COVER):
@@ -306,36 +328,27 @@ def admin_upload_song():
             cover_file=cover_filename,
             genre=final_genre,
             lyrics=lyrics,
-            uploaded_by=0 # 0 for Admin
+            uploaded_by=0, # 0 for Admin
+            audio_hash=audio_hash
         )
         
         db.session.add(new_song)
         db.session.commit()
 
         # --- AUTO-SYNC TO PROD ---
-        print("🔄 Starting Auto-Sync to Production...")
+        print("🔄 Starting Auto-Sync to Production in background...")
         
-        # 1. Upload Files to R2
         audio_path = os.path.join(app.config['UPLOAD_AUDIO'], filename)
-        upload_to_r2(audio_path, f"audio/{filename}")
-        
-        if cover_filename:
-            cover_path = os.path.join(app.config['UPLOAD_COVER'], cover_filename)
-            upload_to_r2(cover_path, f"covers/{cover_filename}")
+        cover_path = os.path.join(app.config['UPLOAD_COVER'], cover_filename) if cover_filename else None
 
-        # 2. Sync Database to Render
-        try:
-            sync_songs()
-        except Exception as e:
-            print(f"❌ DB Sync Failed: {e}")
-            return jsonify({
-                "msg": "Song saved locally but Sync failed.", 
-                "error": str(e),
-                "song": {"id": new_song.id, "title": new_song.title}
-            }), 201
+        threading.Thread(
+            target=background_sync, 
+            args=(audio_path, f"audio/{filename}", cover_path, f"covers/{cover_filename}" if cover_filename else None),
+            daemon=True
+        ).start()
 
         return jsonify({
-            "msg": "Song uploaded & Synced to Live App! 🚀", 
+            "msg": "Song uploaded & Sync started! 🚀", 
             "song": {
                 "id": new_song.id,
                 "title": new_song.title,
@@ -348,6 +361,7 @@ def admin_upload_song():
 # MOVED PLAYER ROUTES TO FIX NEXT/PREV
 @app.route("/player/play", methods=["POST"])
 @jwt_required()
+@limiter.limit("300 per day; 30 per minute")
 def player_play_top():
     user_id = int(get_jwt_identity())
     data = request.json or {}
@@ -391,9 +405,8 @@ def player_play_top():
     song = Song.query.get(song_id)
     if not song: return jsonify(error="Song not found"), 404
 
-    # CORS FIX: Always route through our proxy endpoint
-    # This prevents the frontend from hitting R2 directly (which lacks CORS headers)
-    audio_url = full_url(f"/songs/{song.id}/stream")
+    # Switch to R2 presigned URLs directly instead of proxying through Flask
+    audio_url = get_presigned_url(song.audio_file, "audio")
     cover_url = get_presigned_url(song.cover_file, "covers") if song.cover_file else None
 
     return jsonify({
@@ -406,6 +419,7 @@ def player_play_top():
 
 @app.route("/player/next", methods=["POST"])
 @jwt_required()
+@limiter.limit("300 per day; 30 per minute")
 def player_next_top():
     user_id = int(get_jwt_identity())
     state = PlaybackState.query.filter_by(user_id=user_id).first()
@@ -463,11 +477,12 @@ def player_next_top():
         "title": song.title,
         "artist": song.artist,
         "cover": get_presigned_url(song.cover_file, "covers") if song.cover_file else None,
-        "audio": full_url(f"/songs/{song.id}/stream")
+        "audio": get_presigned_url(song.audio_file, "audio")
     })
 
 @app.route("/player/prev", methods=["POST"])
 @jwt_required()
+@limiter.limit("300 per day; 30 per minute")
 def player_prev_top():
     user_id = int(get_jwt_identity())
     state = PlaybackState.query.filter_by(user_id=user_id).first()
@@ -503,7 +518,7 @@ def player_prev_top():
                     "title": current_song.title,
                     "artist": current_song.artist,
                     "cover": get_presigned_url(current_song.cover_file, "covers") if current_song.cover_file else None,
-                    "audio": full_url(f"/songs/{current_song.id}/stream")
+                    "audio": get_presigned_url(current_song.audio_file, "audio")
                  })
         return jsonify(error="No history"), 400
 
@@ -524,7 +539,7 @@ def player_prev_top():
         "title": song.title,
         "artist": song.artist,
         "cover": get_presigned_url(song.cover_file, "covers") if song.cover_file else None,
-        "audio": full_url(f"/songs/{song.id}/stream")
+        "audio": get_presigned_url(song.audio_file, "audio")
     })
 
 # MOVED ROUTES TO FIX 404
@@ -569,71 +584,34 @@ def get_user_profile_top():
     if not user:
         return jsonify(error="User not found"), 404
         
+    user.last_active_at = datetime.utcnow()
+    db.session.commit()
+        
     return jsonify({
         "id": user.id,
         "username": user.username,
-        "email": user.email
+        "email": user.email,
+        "is_supporter": getattr(user, 'is_supporter', False)
     })
 
-@app.route("/artists/<path:name>", methods=["GET"])
+
+@app.route("/admin/analytics", methods=["GET"])
+def get_analytics():
+    admin_secret = request.headers.get("X-Admin-Secret")
+    if not admin_secret or admin_secret != os.environ.get("ADMIN_SECRET"):
+        return jsonify(error="Unauthorized"), 403
+
+    now = datetime.utcnow()
+    dau = User.query.filter(User.last_active_at >= now - timedelta(days=1)).count()
+    mau = User.query.filter(User.last_active_at >= now - timedelta(days=30)).count()
+    
+    return jsonify(dau=dau, mau=mau, total_users=User.query.count(), total_songs=Song.query.count())
+
+@app.route("/supporter/status", methods=["GET"])
 @jwt_required()
-def get_artist_profile(name):
-    # Decode name safely
-    from urllib.parse import unquote
-    artist_name = unquote(name)
-    
-    # 1. Get Songs by Artist
-    songs = Song.query.filter(func.lower(Song.artist) == artist_name.lower()).all()
-    
-    if not songs:
-        # Fuzzy match fallback? Or just 404? 
-        return jsonify(error="Artist not found"), 404
-
-    # 2. Get Bio from User table (if claimed)
-    # Try to find a user whose username matches or is linked
-    # For now, strict match on username or we could add an 'artist_name' field to User later
-    artist_user = User.query.filter(func.lower(User.username) == artist_name.lower(), User.is_artist == True).first()
-    bio = artist_user.artist_bio if artist_user else "Approved Krew Artist"
-
-    # 3. Calculate Stats
-    total_plays = (
-        db.session.query(func.count(PlayLog.id))
-        .join(Song, PlayLog.song_id == Song.id)
-        .filter(func.lower(Song.artist) == artist_name.lower())
-        .scalar()
-    ) or 0
-    
-    # 4. Top Songs (by plays)
-    top_songs_res = (
-        db.session.query(Song, func.count(PlayLog.id).label("plays"))
-        .outerjoin(PlayLog, PlayLog.song_id == Song.id)
-        .filter(func.lower(Song.artist) == artist_name.lower())
-        .group_by(Song.id)
-        .order_by(desc("plays"))
-        .limit(5)
-        .all()
-    )
-    
-    top_songs = [{
-        "id": s.id,
-        "title": s.title,
-        "album": s.album,
-        "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
-        "plays": plays
-    } for s, plays in top_songs_res]
-
-    # 5. Albums
-    albums = list(set([s.album for s in songs if s.album]))
-    
-    return jsonify({
-        "name": songs[0].artist, # Use DB casing
-        "bio": bio,
-        "monthly_listeners": int(total_plays * 0.4), # Fake 'monthly' stat derived from total
-        "total_plays": total_plays,
-        "top_songs": top_songs,
-        "albums": albums,
-        "similar_artists": [] # Placeholder
-    })
+def get_supporter_status():
+    user = User.query.get(get_jwt_identity())
+    return jsonify(is_supporter=getattr(user, 'is_supporter', False))
 
 # =========================================================
 # EXTENSIONS (MUST COME BEFORE MODELS)
@@ -657,43 +635,48 @@ if not is_dev and not os.environ.get("JWT_SECRET_KEY"):
 # CORS handled manually for maximum compatibility
 # Note: dynamic origin reflection is required for withCredentials=true
 
+ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "https://kreewaux.xyz,https://api.kreewaux.xyz,http://localhost:3000,http://localhost:8080").split(",")
+
 def is_allowed_origin(origin):
-    # TEMPORARY: Allow EVERYTHING to debug mobile data issues
-    return True
+    if not origin:
+        return False
+    origin = origin.rstrip('/')
+    return origin in ALLOWED_ORIGINS
 
 @app.before_request
 def handle_options_request():
     if request.method == "OPTIONS":
-        origin = request.headers.get("Origin", "*")
+        origin = request.headers.get("Origin")
         response = Response()
-        response.headers["Access-Control-Allow-Origin"] = origin
+        if origin and is_allowed_origin(origin):
+            response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Accept, ngrok-skip-browser-warning"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Accept, ngrok-skip-browser-warning, X-Admin-Secret"
         return response
 
 @app.after_request
 def add_cors_headers(response):
-    origin = request.headers.get("Origin", "*")
-    response.headers["Access-Control-Allow-Origin"] = origin
+    origin = request.headers.get("Origin")
+    if origin and is_allowed_origin(origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
     response.headers["Access-Control-Allow-Credentials"] = "true"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Accept, ngrok-skip-browser-warning"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Accept, ngrok-skip-browser-warning, X-Admin-Secret"
     return response
 
 
 def get_current_position(jam_id):
-    # Changed: guard against missing state/started_at and return a float position
-    state = jam_state.get(jam_id)
-    if not state:
+    jam = db.session.get(JamSession, jam_id)
+    if not jam:
         return 0.0
-    if state.get("paused"):
-        return float(state.get("position", 0.0))
-    if not state.get("started_at"):
-        return float(state.get("position", 0.0))
-    elapsed = (datetime.utcnow() - state["started_at"]).total_seconds()
-    return float(state.get("position", 0.0) + elapsed)
-
+    if jam.paused:
+        return float(jam.position or 0.0)
+    if not jam.started_at:
+        return float(jam.position or 0.0)
+    elapsed = (datetime.utcnow() - jam.started_at).total_seconds()
+    return float((jam.position or 0.0) + elapsed)
+a
 @app.before_request
 def log_request_info():
     if request.path.startswith("/playlists/import"):
@@ -753,9 +736,6 @@ def log_request_info():
 # discord_service = DiscordService(DISCORD_CLIENT_ID) 
 # threading.Thread(target=discord_service.connect, daemon=True).start()
 
-
-def full_url(path):
-    return request.host_url.rstrip("/") + path
 
 # R2 Storage Configuration
 # R2 Storage Configuration
@@ -927,6 +907,9 @@ class User(db.Model):
     username = db.Column(db.String(80), unique=True, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(255), nullable=False)
+    
+    last_active_at = db.Column(db.DateTime, default=datetime.utcnow)
+    is_supporter = db.Column(db.Boolean, default=False)
     
     # Artist verification fields
     is_artist = db.Column(db.Boolean, default=False)
@@ -1251,9 +1234,12 @@ def send_range_file(path):
 
 
 def get_active_queue(state):
-    return json.loads(
-        state.shuffled_queue if state.shuffle else state.original_queue
-    )
+    try:
+        return json.loads(
+            state.shuffled_queue if state.shuffle else state.original_queue
+        )
+    except Exception:
+        return []
 
 # =========================================================
 #GENRE BROWSE ENDPOINTS
@@ -1296,15 +1282,6 @@ def songs_by_genre(genre):
         for s in songs
     ])
 
-@app.route("/artists", methods=["GET"])
-def get_artists():
-    # Frontend expects a list of STRINGS (names)
-    artists = Artist.query.order_by(Artist.name.asc()).all()
-    # If explicit artist table is empty, fallback to distinct songs?
-    # But we populated it.
-    
-    return jsonify([a.name for a in artists])
-
 @app.route("/artists/<path:name>", methods=["GET"])
 def get_artist_details(name):
     # Case insensitive search
@@ -1315,8 +1292,14 @@ def get_artist_details(name):
     #   "top_tracks": [ ...songs... ]
     # }
 
-    # 1. Fetch Songs first
-    songs = Song.query.filter(func.lower(Song.artist) == func.lower(name)).all()
+    from urllib.parse import unquote
+    import re
+    artist_name = unquote(name)
+
+    # 1. Fetch Songs first (Smart match)
+    clean_name = re.sub(r'(?i)\b(?:feat\.?|ft\.?|and|&)\b.*', '', artist_name).strip()
+    clean_name = re.sub(r'[^\w\s]', '%', clean_name)
+    songs = Song.query.filter(Song.artist.ilike(f"%{clean_name}%")).all()
     
     if not songs:
         # Check if artist exists in Artist table but has no songs?
@@ -1353,7 +1336,7 @@ def get_artist_details(name):
             "artist": s.artist or "Unknown Artist",
             "album": s.album or "", 
             "cover": full_url(f"/covers/{s.cover_file}") if s.cover_file else None, # Use Proxy
-            "url": full_url(f"/songs/{s.id}/stream"), # Use Proxy
+            "url": get_presigned_url(s.audio_file, "audio"), # Direct URL
             "genre": s.genre or "",
             "lyrics": s.lyrics
         }
@@ -1395,7 +1378,7 @@ def get_songs():
             "title": s.title,
             "artist": s.artist,
             "cover": full_url(f"/covers/{s.cover_file}") if s.cover_file else None,
-            "audio_url": full_url(f"/songs/{s.id}/stream"),
+            "audio_url": get_presigned_url(s.audio_file, "audio"),
             "genre": s.genre,
             "lyrics": s.lyrics
         })
@@ -1416,54 +1399,6 @@ def get_songs():
 # =========================================================
 # SEARCH & LANDING
 # =========================================================
-
-@app.route("/search", methods=["GET"])
-def search_songs():
-    q = request.args.get("q", "").strip()
-    genre = request.args.get("genre")
-    
-    if not q and not genre:
-        return jsonify(results=[], recommended=[])
-
-    query = Song.query
-
-    # strict filtering by genre if provided
-    if genre:
-        query = query.filter(Song.genre == genre)
-
-    # fuzzy search logic
-    if q:
-        # PostgreSQL: ilike is case insensitive. SQLite: like is case insensitive by default for ASCII.
-        # We use ilike for Postgres compatibility on Render.
-        search_filter = or_(
-            Song.title.ilike(f"%{q}%"),
-            Song.artist.ilike(f"%{q}%"),
-            Song.album.ilike(f"%{q}%"),
-            Song.lyrics.ilike(f"%{q}%") # Search in lyrics too!
-        )
-        query = query.filter(search_filter)
-
-    # Limit results
-    results = query.limit(50).all()
-
-    # Format
-    data = []
-    for s in results:
-        data.append({
-            "id": s.id,
-            "title": s.title,
-            "artist": s.artist,
-            "cover": full_url(f"/covers/{s.cover_file}") if s.cover_file else None,
-            "audio_url": full_url(f"/songs/{s.id}/stream"),
-            "genre": s.genre,
-            "lyrics": s.lyrics
-        })
-
-    return jsonify({
-        "results": data,
-        "recommended": [] # Todo: implement recommendations based on result
-    })
-
 
 @app.route("/song/<int:song_id>")
 def song_landing_page(song_id):
@@ -2077,162 +2012,6 @@ def player_shuffle():
     return jsonify(msg="Shuffle updated", enabled=enabled)
 
 
-@app.route("/player/next", methods=["POST"])
-@jwt_required()
-def player_next():
-    user_id = int(get_jwt_identity())
-    state = get_player(user_id)
-
-    queue = get_active_queue(state)
-
-    if not queue or not state.current_song_id:
-        return jsonify(next=None)
-
-    # Repeat one
-    if state.repeat == "one":
-        song = Song.query.get(state.current_song_id)
-        return jsonify(
-            id=song.id,
-            title=song.title,
-            artist=song.artist,
-            cover=song.cover_file,
-            audio=full_url(f"/songs/{song.id}/stream")
-        )
-
-    # -------------------------
-    # FIX: Log Play for Stats (Repeat One)
-    # -------------------------
-    if state.repeat == "one":
-         try:
-            song = Song.query.get(state.current_song_id)
-            play = PlayLog(
-                user_id=user_id,
-                song_id=song.id,
-                played_at=datetime.utcnow()
-            )
-            db.session.add(play)
-            db.session.commit()
-         except:
-             pass
-
-    try:
-        idx = queue.index(state.current_song_id)
-    except ValueError:
-        idx = -1
-
-    # Normal next
-    if idx + 1 < len(queue):
-        state.current_song_id = queue[idx + 1]
-
-    # Repeat all
-    elif state.repeat == "all":
-        state.current_song_id = queue[0]
-
-    # Autoplay (Spotify-style)
-    else:
-        autoplay_fill(state)
-        # Re-fetch queue to see if songs were added
-        queue = get_active_queue(state)
-        
-        if idx + 1 < len(queue):
-            state.current_song_id = queue[idx + 1]
-        else:
-            db.session.commit()
-            return jsonify(next=None)
-
-    db.session.commit()
-    song = Song.query.get(state.current_song_id)
-
-    # Save to History
-    try:
-        hist = QueueHistory(user_id=user_id, song_id=song.id)
-        db.session.add(hist)
-        db.session.commit()
-    except:
-        pass
-
-    # Discord RPC Update
-    discord_service.update(song.title, song.artist)
-
-    # -------------------------
-    # FIX: Log Play for Stats (Next)
-    # -------------------------
-    try:
-        play = PlayLog(
-            user_id=user_id,
-            song_id=song.id,
-            played_at=datetime.utcnow()
-        )
-        db.session.add(play)
-        db.session.commit()
-    except:
-        pass
-
-    return jsonify(
-        id=song.id,
-        title=song.title,
-        artist=song.artist,
-        cover=song.cover_file,
-        audio=full_url(f"/songs/{song.id}/stream")
-    )
-
-
-@app.route("/player/prev", methods=["POST"])
-@jwt_required()
-def player_prev():
-    user_id = int(get_jwt_identity())
-    state = get_player(user_id)
-    queue = get_active_queue(state)
-
-    if not queue:
-        return jsonify(msg="No queue")
-
-    idx = -1
-    if state.current_song_id:
-        try:
-            idx = queue.index(state.current_song_id)
-        except ValueError:
-            pass
-
-    prev_id = None
-    if idx > 0:
-        prev_id = queue[idx - 1]
-    elif state.repeat == "all" and queue:
-        prev_id = queue[-1]
-    
-    if prev_id:
-        state.current_song_id = prev_id
-        db.session.commit()
-        
-        song = Song.query.get(prev_id)
-        if song:
-            # Discord RPC Update
-            discord_service.update(song.title, song.artist)
-
-            # -------------------------
-            # FIX: Log Play for Stats (Prev)
-            # -------------------------
-            try:
-                play = PlayLog(
-                    user_id=user_id,
-                    song_id=song.id,
-                    played_at=datetime.utcnow()
-                )
-                db.session.add(play)
-                db.session.commit()
-            except:
-                pass
-            
-            return jsonify({
-                "id": song.id,
-                "title": song.title,
-                "artist": song.artist,
-                "cover": full_url(f"/covers/{song.cover_file}") if song.cover_file else None,
-                "audio": full_url(f"/audio/{song.audio_file}")
-            })
-            
-    return jsonify(msg="No previous song")
-
 
 @app.route("/songs/<int:sid>", methods=["GET"])
 def get_song_details(sid):
@@ -2746,54 +2525,6 @@ def artist_page(artist_name):
 # =========================================================
 # QUEUE
 # =========================================================
-
-@app.route("/player/queue/modify", methods=["POST"])
-@jwt_required()
-def modify_queue():
-    user_id = int(get_jwt_identity())
-    state = get_player(user_id)
-
-    data = request.json or {}
-    action = data.get("action")
-    if action not in {"remove", "play_next", "clear"}:
-        return jsonify(error="invalid action"), 400
-
-    queue = json.loads(state.original_queue)
-
-    # REMOVE songs
-    if action == "remove":
-        remove_ids = set(data.get("song_ids", []))
-        queue = [sid for sid in queue if sid not in remove_ids]
-
-    # PLAY NEXT
-    elif action == "play_next":
-        song_id = data["song_id"]
-        if song_id in queue:
-            queue.remove(song_id)
-
-        try:
-            idx = queue.index(state.current_song_id)
-            queue.insert(idx + 1, song_id)
-        except ValueError:
-            queue.insert(0, song_id)
-
-    # CLEAR QUEUE
-    elif action == "clear":
-        queue = []
-        state.current_song_id = None
-
-    state.original_queue = json.dumps(queue)
-
-    # keep shuffle in sync
-    if state.shuffle:
-        shuffled = queue[:]
-        random.shuffle(shuffled)
-        state.shuffled_queue = json.dumps(shuffled)
-    else:
-        state.shuffled_queue = json.dumps(queue)
-
-    db.session.commit()
-    return jsonify(msg="Queue updated", queue=queue)
 
 @app.route("/player/queue")
 @jwt_required()
@@ -3343,8 +3074,7 @@ def because_you_listened(sid):
 
 
 # In-memory jam state
-# Changed: introduce jam_state as the single source of truth for Jam playback
-jam_state = {}          # { jam_id: { song_id, started_at, paused, position, last_activity } }
+# Single source of truth is now JamSession Database Model
 jam_listeners = {}      # { jam_id: { user_id: username } }
 jam_skip_votes = {}     # { jam_id: set(user_ids) }
 jam_hosts = {}          # { jam_id: host_user_id }
@@ -3358,34 +3088,28 @@ jam_sockets = {}        # { sid: { jam_id, user_id } }
 JAM_INACTIVE_TIMEOUT = 7200  # 2 hours in seconds
 
 def cleanup_inactive_jams():
-    """Remove jam sessions that have been inactive for JAM_INACTIVE_TIMEOUT seconds."""
-    now = time.time()
+    """Remove inactive jam sessions from memory and DB."""
     with jam_lock:
         inactive_jams = []
-        for jam_id, state in jam_state.items():
-            last_activity = state.get("last_activity", 0)
-            if now - last_activity > JAM_INACTIVE_TIMEOUT:
-                inactive_jams.append(jam_id)
-        
+        try:
+            expiration = datetime.utcnow() - timedelta(seconds=JAM_INACTIVE_TIMEOUT)
+            expired_sessions = JamSession.query.filter(JamSession.last_active < expiration).all()
+            for jam in expired_sessions:
+                inactive_jams.append(jam.id)
+                db.session.delete(jam)
+            db.session.commit()
+        except Exception as e:
+            print(f"Failed to clean old DB jams: {e}")
+            db.session.rollback()
+
         for jam_id in inactive_jams:
-            jam_state.pop(jam_id, None)
             jam_listeners.pop(jam_id, None)
             jam_skip_votes.pop(jam_id, None)
             jam_hosts.pop(jam_id, None)
-            print(f"🧹 Cleaned up inactive jam: {jam_id}")
-        
-        if inactive_jams:
-            print(f"🧹 Cleaned up {len(inactive_jams)} inactive jams. Active: {len(jam_state)}")
+            print(f" Cleaned up inactive jam DB: {jam_id}")
             
-            # Identify DB jams explicitly marked as old or just rely on memory cleanup? 
-            # For strictness, let's delete from DB too if they are super old (e.g. 24h) 
-            # to prevent infinite DB growth.
-            try:
-                expiration = datetime.utcnow() - timedelta(hours=24)
-                JamSession.query.filter(JamSession.last_active < expiration).delete()
-                db.session.commit()
-            except Exception as e:
-                print(f"Failed to clean old DB jams: {e}")
+        if inactive_jams:
+            print(f" Cleaned up {len(inactive_jams)} inactive jams.")
 
 # Schedule periodic cleanup (runs every 30 minutes)
 def start_jam_cleanup_scheduler():
@@ -3405,8 +3129,8 @@ start_jam_cleanup_scheduler()
 
 # Helper to broadcast full state
 def broadcast_jam_state(jam_id, event="jam:sync"):
-    state = jam_state.get(jam_id)
-    if not state:
+    jam = JamSession.query.get(jam_id)
+    if not jam:
         return
 
     # Calculate server time for drift correction
@@ -3414,10 +3138,10 @@ def broadcast_jam_state(jam_id, event="jam:sync"):
     server_time = time.time()
 
     payload = {
-        "song_id": state["song_id"],
-        "paused": state["paused"],
-        "started_at": state["started_at"].isoformat() if state["started_at"] else None,
-        "position": state["position"], 
+        "song_id": jam.song_id,
+        "paused": jam.paused,
+        "started_at": jam.started_at.isoformat() if jam.started_at else None,
+        "position": jam.position, 
         "server_time": server_time
     }
 
@@ -3457,24 +3181,10 @@ def jam_join(data):
         db_jam = JamSession.query.get(jam_id)
         if db_jam:
              jam_hosts[jam_id] = db_jam.host_id
-             jam_state[jam_id] = {
-                "song_id": db_jam.song_id,
-                "started_at": db_jam.started_at,
-                "paused": db_jam.paused,
-                "position": db_jam.position,
-                "last_activity": time.time()
-             }
              print(f"📥 Loaded Jam {jam_id} from DB")
         else:
             # CREATE NEW
             jam_hosts[jam_id] = user_id
-            jam_state[jam_id] = {
-                "song_id": None,
-                "started_at": None,
-                "paused": True,
-                "position": 0,
-                "last_activity": time.time()
-            }
             
             # SAVE TO DB
             try:
@@ -3491,23 +3201,24 @@ def jam_join(data):
         emit("jam:host", {"user_id": jam_hosts[jam_id]}, room=room)
 
     # 🔁 SEND CURRENT STATE TO JOINER (only to the joining socket)
-    state = jam_state.get(jam_id)
-    if not state:
+    jam = JamSession.query.get(jam_id)
+    if not jam:
         # Safety: initialize if missing
-        jam_state[jam_id] = {
-            "song_id": None,
-            "started_at": None,
-            "paused": True,
-            "position": 0,
-            "last_activity": time.time()
-        }
-        state = jam_state[jam_id]
+        jam = JamSession(
+            id=jam_id,
+            host_id=jam_hosts.get(jam_id, user_id),
+            last_active=datetime.utcnow()
+        )
+        try:
+            db.session.add(jam)
+            db.session.commit()
+        except: pass
 
     emit(
         "jam:sync",
         {
-            "song_id": state["song_id"],
-            "paused": state["paused"],
+            "song_id": jam.song_id,
+            "paused": jam.paused,
             "position": get_current_position(jam_id)
         },
         to=request.sid
@@ -3533,15 +3244,6 @@ def jam_play(data):
     if not song_id:
         return  # Safety: ignore invalid song_id
 
-    # Changed: update jam_state ONLY; no DB writes, jam_state is authority
-    jam_state.setdefault(jam_id, {})
-    jam_state[jam_id] = {
-        "song_id": song_id,
-        "started_at": datetime.utcnow(),
-        "paused": False,
-        "position": position
-    }
-    
     # DB SYNC
     try:
         jam_db = JamSession.query.get(jam_id)
@@ -3567,27 +3269,20 @@ def jam_pause(data):
     if not user_id or jam_id not in jam_listeners:
         return
 
-    state = jam_state.get(jam_id)
-    if not state:
+    jam_db = JamSession.query.get(jam_id)
+    if not jam_db:
         return  # Safety
 
     # Use client provided position if available, else calc
     pos = float(data.get("position", get_current_position(jam_id)))
 
-    # Changed: update jam_state ONLY
-    state["paused"] = True
-    state["position"] = pos
-    state["started_at"] = None  # freeze clock
-
     # DB SYNC
     try:
-        jam_db = JamSession.query.get(jam_id)
-        if jam_db:
-            jam_db.paused = True
-            jam_db.position = pos
-            jam_db.started_at = None
-            jam_db.last_active = datetime.utcnow()
-            db.session.commit()
+        jam_db.paused = True
+        jam_db.position = pos
+        jam_db.started_at = None
+        jam_db.last_active = datetime.utcnow()
+        db.session.commit()
     except Exception as e:
         print(f"Jam DB Sync Error (Pause): {e}")
 
@@ -3602,20 +3297,15 @@ def jam_seek(data):
     if not user_id or jam_id not in jam_listeners:
         return
 
-    state = jam_state.get(jam_id)
-    if not state:
+    jam_db = JamSession.query.get(jam_id)
+    if not jam_db:
         return  # Safety
-
-    # Changed: update position only, preserve paused state
-    state["position"] = position
-    state["started_at"] = datetime.utcnow() if not state.get("paused") else None
 
     # DB SYNC
     try:
-        jam_db = JamSession.query.get(jam_id)
         if jam_db:
             jam_db.position = position
-            if not state.get("paused"):
+            if not jam_db.paused:
                 jam_db.started_at = datetime.utcnow()
             jam_db.last_active = datetime.utcnow()
             db.session.commit()
@@ -3693,7 +3383,11 @@ def jam_vote_skip(data):
         if not queue:
             return
 
-        current_song_id = (jam_state.get(jam_id) or {}).get("song_id")
+        jam_db = JamSession.query.get(jam_id)
+        if not jam_db:
+            return
+
+        current_song_id = jam_db.song_id
         next_song_id = None
 
         if current_song_id in queue:
@@ -3712,18 +3406,8 @@ def jam_vote_skip(data):
         if not next_song_id:
             return
 
-        # Update jam_state ONLY and broadcast jam:play
-        jam_state.setdefault(jam_id, {})
-        jam_state[jam_id] = {
-            "song_id": next_song_id,
-            "started_at": datetime.utcnow(),
-            "paused": False,
-            "position": 0.0
-        }
-        
         # DB SYNC (Vote Skip -> Next Song)
         try:
-            jam_db = JamSession.query.get(jam_id)
             if jam_db:
                 jam_db.song_id = next_song_id
                 jam_db.started_at = datetime.utcnow()
@@ -3790,28 +3474,11 @@ def on_disconnect():
     emit("jam:listeners", list(jam_listeners.get(jam_id, {}).values()), room=f"jam:{jam_id}")
 
 
+
+
 # =========================================================
-# ANALYTICS
+# RECOMMENDATIONS (BASIC-ADVANCE(MID))
 # =========================================================
-
-@app.route("/songs/<int:sid>/played", methods=["POST"])
-@jwt_required()
-def log_play(sid):
-    data = request.json or {}
-    duration = int(data.get("duration") or 0)
-    
-    play = PlayLog(
-        user_id=int(get_jwt_identity()),
-        song_id=sid,
-        listen_duration=duration
-    )
-    db.session.add(play)
-    db.session.commit()
-    return jsonify(msg="Play logged", duration=duration)
-
-
-
-
 
 
 # =========================================================
@@ -4798,7 +4465,7 @@ else:
             pass
             
         try:
-            print("🚀 Gunicorn startup: Syncing R2...")
+            print("Gunicorn startup: Syncing R2...")
             sync_r2_songs()
         except Exception as e:
             print(f"Startup Sync Error: {e}")
