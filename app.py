@@ -389,17 +389,18 @@ def player_play_top():
     # 2. Update Current
     state.current_song_id = song_id
 
-    # 3. Remove new song from Queue (so Next doesn't repeat it)
-    # This is critical for "Next button plays same song" fix
-    try:
-        queue = json.loads(state.shuffled_queue if state.shuffle else state.original_queue)
-    except: queue = []
+    # 3. Clear existing queue and instantly fill it with "same vibe" songs
+    state.original_queue = "[]"
+    if state.shuffle:
+        state.shuffled_queue = "[]"
     
-    if song_id in queue:
-        queue = [s for s in queue if s != song_id]
-        if state.shuffle: state.shuffled_queue = json.dumps(queue)
-        else: state.original_queue = json.dumps(queue)
+    # Commit the new current song so autoplay_fill uses it
+    db.session.commit()
 
+    # Generate the vibe-based queue immediately
+    autoplay_fill(state)
+    
+    # Save the updated queue
     db.session.commit()
 
     song = Song.query.get(song_id)
@@ -2525,28 +2526,28 @@ def artist_page(artist_name):
 # =========================================================
 # QUEUE
 # =========================================================
+def get_active_queue(state):
+    current_song = Song.query.get(state.current_song_id)
 
-@app.route("/player/queue")
-@jwt_required()
-def player_queue():
-    user_id = int(get_jwt_identity())
-    state = get_player(user_id)
+    if not current_song:
+        return []
 
-    queue = get_active_queue(state)
-    songs = {s.id: s for s in Song.query.filter(Song.id.in_(queue)).all()}
+    # 1. Same artist
+    songs = Song.query.filter(
+        Song.artist == current_song.artist,
+        Song.id != current_song.id
+    ).limit(10).all()
 
-    return jsonify({
-    "current_song": state.current_song_id,
-    "queue": [
-        {
-            "id": songs[sid].id,
-            "title": songs[sid].title,
-            "artist": songs[sid].artist,
-            "cover": full_url(f"/covers/{songs[sid].cover_file}") if songs[sid].cover_file else None
-        }
-        for sid in queue if sid in songs
-    ]
-})
+    if len(songs) < 5:
+        # 2. Same genre fallback
+        more = Song.query.filter(
+            Song.genre == current_song.genre,
+            Song.id != current_song.id
+        ).limit(10).all()
+
+        songs += more
+
+    return [s.id for s in songs]
 
 
 
@@ -2555,10 +2556,26 @@ def autoplay_fill(state):
     if not last_song:
         return
 
-    queue = json.loads(state.original_queue)
+    try:
+        queue = json.loads(state.original_queue)
+    except:
+        queue = []
+        
     existing_ids = set(queue)
 
-    # Fetch last 50 played songs to avoid repetition
+    # 1. Explicitly exclude current song
+    if state.current_song_id:
+        existing_ids.add(state.current_song_id)
+
+    # 2. Exclude history to prevent skipped songs from immediately repeating
+    try:
+        hist = json.loads(state.history or "[]")
+        for h_id in hist:
+            existing_ids.add(h_id)
+    except:
+        pass
+
+    # 3. Fetch recent plays for vibe and deduplication
     recent_plays = (
         PlayLog.query
         .filter_by(user_id=state.user_id)
@@ -2566,66 +2583,61 @@ def autoplay_fill(state):
         .limit(50)
         .all()
     )
+    
+    # Establish broader vibe context to avoid getting stuck in one artist loop
+    vibe_songs = [last_song]
+    for p in recent_plays[:5]:
+        s = Song.query.get(p.song_id)
+        if s and s not in vibe_songs:
+            vibe_songs.append(s)
+            
     for p in recent_plays:
         existing_ids.add(p.song_id)
 
-    # 1.5 Explicitly exclude current song (critical for next button)
-    if state.current_song_id:
-        existing_ids.add(state.current_song_id)
-    
-    # 1. Try: Similar Artist (Smart Match)
-    # Split "Pritam, Arijit Singh" -> ["Pritam", "Arijit Singh"]
+    # Gather all recent artists and genres for a diverse queue
     import re
-    artists = [a.strip() for a in re.split(r'[,&]|\sfeat\.|\sft\.', last_song.artist, flags=re.IGNORECASE) if a.strip()]
+    artists_set = set()
+    genres_set = set()
     
-    # Create fuzzy filters for each artist part
-    artist_filters = [Song.artist.ilike(f"%{a}%") for a in artists]
-    
-    # Prioritize: Songs by same artist(s), excluding current
-    related = (
-        Song.query
-        .filter(or_(*artist_filters))
-        .filter(Song.id.notin_(existing_ids))
-        .order_by(func.random())
-        .limit(10) # Fetched more
-        .all()
-    )
+    for s in vibe_songs:
+        if s.artist:
+            parts = [a.strip() for a in re.split(r'[,&]|\sfeat\.|\sft\.', s.artist, flags=re.IGNORECASE) if a.strip()]
+            for p in parts:
+                if p.lower() not in ['unknown artist', 'unknown']:
+                    artists_set.add(p)
+        if s.genre and s.genre.lower() not in ['unknown', 'import', 'other', 'single', 'undefined']:
+            genres_set.add(s.genre)
 
-    # 1.5 Try: BPM Match (Vibe) - if current song has BPM
-    if len(related) < 10 and last_song.bpm:
-        # +/- 10 BPM range
-        bpm_range = 10
-        bpm_songs = (
+    related = []
+    
+    # Try: Mix of Similar Artists
+    if artists_set:
+        artist_filters = [Song.artist.ilike(f"%{a}%") for a in artists_set]
+        artist_songs = (
             Song.query
-            .filter(
-                Song.bpm.between(last_song.bpm - bpm_range, last_song.bpm + bpm_range),
-                Song.id.notin_(existing_ids),
-                ~Song.id.in_([s.id for s in related])
-            )
+            .filter(or_(*artist_filters))
+            .filter(Song.id.notin_(existing_ids))
             .order_by(func.random())
-            .limit(10 - len(related))
+            .limit(10)
             .all()
         )
-        related.extend(bpm_songs)
+        related.extend(artist_songs)
 
-    # 2. Try: Same Genre (if shortage)
-    valid_genre = last_song.genre and last_song.genre.lower() not in ['unknown', 'import', 'other', 'single', 'undefined']
-    
-    if len(related) < 10 and valid_genre:
+    # Try: Same Genres (if shortage)
+    if len(related) < 10 and genres_set:
+        genre_filters = [Song.genre == g for g in genres_set]
         genre_songs = (
             Song.query
-            .filter(
-                Song.genre == last_song.genre,
-                Song.id.notin_(existing_ids),
-                ~Song.id.in_([s.id for s in related])
-            )
+            .filter(or_(*genre_filters))
+            .filter(Song.id.notin_(existing_ids))
+            .filter(~Song.id.in_([s.id for s in related]))
             .order_by(func.random())
             .limit(10 - len(related))
             .all()
         )
         related.extend(genre_songs)
 
-    # 3. Fallback: Completely Random (excluding history)
+    # Fallback: Completely Random
     if len(related) < 5:
         random_songs = (
             Song.query
@@ -2640,22 +2652,21 @@ def autoplay_fill(state):
     if not related:
         return
 
-    # Append new songs
+    # Shuffle related to interleave artists and prevent "lumps" of the same artist
+    import random
+    random.shuffle(related)
+
     new_ids = [s.id for s in related]
     queue.extend(new_ids)
 
     state.original_queue = json.dumps(queue)
 
-    # 🔥 CRITICAL: keep shuffle in sync
     if state.shuffle:
-        shuffled = json.loads(state.shuffled_queue) if state.shuffled_queue else []
-        # Add new songs to shuffled queue too (randomly inserted or appended)
-        # For simplicity, just append and shuffle the new chunk? 
-        # Or just append to end of shuffled.
+        try:
+            shuffled = json.loads(state.shuffled_queue)
+        except:
+            shuffled = []
         shuffled.extend(new_ids)
-        # Re-shuffle only the new part? No, users expect random. 
-        # But we don't want to reshuffle the *played* history.
-        # Just appending is fine for "autoplay" feel.
         state.shuffled_queue = json.dumps(shuffled)
 
 @app.route("/player/queue/add", methods=["POST"])
