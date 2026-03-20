@@ -2575,7 +2575,7 @@ def autoplay_fill(state):
     except:
         pass
 
-    # 3. Fetch recent plays for vibe and deduplication
+    # 3. Fetch recent plays strictly for deduplication (don't mix old vibes)
     recent_plays = (
         PlayLog.query
         .filter_by(user_id=state.user_id)
@@ -2583,34 +2583,26 @@ def autoplay_fill(state):
         .limit(50)
         .all()
     )
-    
-    # Establish broader vibe context to avoid getting stuck in one artist loop
-    vibe_songs = [last_song]
-    for p in recent_plays[:5]:
-        s = Song.query.get(p.song_id)
-        if s and s not in vibe_songs:
-            vibe_songs.append(s)
-            
     for p in recent_plays:
         existing_ids.add(p.song_id)
 
-    # Gather all recent artists and genres for a diverse queue
+    # Base the vibe exclusively on the currently playing song
     import re
     artists_set = set()
     genres_set = set()
     
-    for s in vibe_songs:
-        if s.artist:
-            parts = [a.strip() for a in re.split(r'[,&]|\sfeat\.|\sft\.', s.artist, flags=re.IGNORECASE) if a.strip()]
-            for p in parts:
-                if p.lower() not in ['unknown artist', 'unknown']:
-                    artists_set.add(p)
-        if s.genre and s.genre.lower() not in ['unknown', 'import', 'other', 'single', 'undefined']:
-            genres_set.add(s.genre)
+    if last_song.artist:
+        parts = [a.strip() for a in re.split(r'[,&]|\sfeat\.|\sft\.', last_song.artist, flags=re.IGNORECASE) if a.strip()]
+        for p in parts:
+            if p.lower() not in ['unknown artist', 'unknown']:
+                artists_set.add(p)
+                
+    if last_song.genre and last_song.genre.lower() not in ['unknown', 'import', 'other', 'single', 'undefined']:
+        genres_set.add(last_song.genre)
 
     related = []
     
-    # Try: Mix of Similar Artists
+    # Slot 1: Same Artist (max 3 songs to prevent getting trapped)
     if artists_set:
         artist_filters = [Song.artist.ilike(f"%{a}%") for a in artists_set]
         artist_songs = (
@@ -2618,31 +2610,34 @@ def autoplay_fill(state):
             .filter(or_(*artist_filters))
             .filter(Song.id.notin_(existing_ids))
             .order_by(func.random())
-            .limit(10)
+            .limit(3)
             .all()
         )
         related.extend(artist_songs)
 
-    # Try: Same Genres (if shortage)
-    if len(related) < 10 and genres_set:
+    # Slot 2: Same Genre (up to 4 songs to keep the general feel)
+    if len(related) < 7 and genres_set:
         genre_filters = [Song.genre == g for g in genres_set]
+        ignore_ids = [s.id for s in related] if related else [-1]
+        
         genre_songs = (
             Song.query
             .filter(or_(*genre_filters))
             .filter(Song.id.notin_(existing_ids))
-            .filter(~Song.id.in_([s.id for s in related]))
+            .filter(~Song.id.in_(ignore_ids))
             .order_by(func.random())
-            .limit(10 - len(related))
+            .limit(7 - len(related))
             .all()
         )
         related.extend(genre_songs)
 
-    # Fallback: Completely Random
-    if len(related) < 5:
+    # Slot 3: Completely Random (fill remaining up to 10 for true discovery)
+    if len(related) < 10:
+        ignore_ids = [s.id for s in related] if related else [-1]
         random_songs = (
             Song.query
             .filter(Song.id.notin_(existing_ids))
-            .filter(~Song.id.in_([s.id for s in related]))
+            .filter(~Song.id.in_(ignore_ids))
             .order_by(func.random())
             .limit(10 - len(related))
             .all()
