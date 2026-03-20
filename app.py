@@ -677,7 +677,7 @@ def get_current_position(jam_id):
         return float(jam.position or 0.0)
     elapsed = (datetime.utcnow() - jam.started_at).total_seconds()
     return float((jam.position or 0.0) + elapsed)
-a
+
 @app.before_request
 def log_request_info():
     if request.path.startswith("/playlists/import"):
