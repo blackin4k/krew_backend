@@ -92,6 +92,18 @@ app.config["UPLOAD_AUDIO"] = AUDIO_DIR
 app.config["UPLOAD_COVER"] = COVER_DIR
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MiB upload limit
 
+# =========================================================
+# EXTENSIONS (MUST COME BEFORE MODELS & ROUTES)
+# =========================================================
+db = SQLAlchemy(app)
+jwt = JWTManager(app)
+bcrypt = Bcrypt(app)
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+# Rate limiting
+limiter = Limiter(key_func=get_remote_address, storage_uri="memory://")
+limiter.init_app(app)
+
 @app.route("/ping_top")
 def ping_top():
     return jsonify(msg="pong_top")
@@ -613,18 +625,6 @@ def get_analytics():
 def get_supporter_status():
     user = User.query.get(get_jwt_identity())
     return jsonify(is_supporter=getattr(user, 'is_supporter', False))
-
-# =========================================================
-# EXTENSIONS (MUST COME BEFORE MODELS)
-# =========================================================
-db = SQLAlchemy(app)
-jwt = JWTManager(app)
-bcrypt = Bcrypt(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
-
-# Rate limiting
-limiter = Limiter(key_func=get_remote_address, storage_uri="memory://")
-limiter.init_app(app)
 
 import os
 import re
