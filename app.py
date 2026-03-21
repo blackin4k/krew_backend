@@ -4500,7 +4500,7 @@ if __name__ == "__main__":
             db.session.commit()
             print("Auto-migrated: Added cover_file to playlist")
         except Exception as e:
-            pass
+            db.session.rollback()
 
         # Auto-migration for PlayLog
         try:
@@ -4508,14 +4508,14 @@ if __name__ == "__main__":
             db.session.commit()
             print("Auto-migrated: Added completed to play_logs")
         except Exception:
-            pass
+            db.session.rollback()
 
         try:
             db.session.execute(text("ALTER TABLE play_logs ADD COLUMN listen_duration INTEGER DEFAULT 0"))
             db.session.commit()
             print("Auto-migrated: Added listen_duration to play_logs")
         except Exception:
-            pass
+            db.session.rollback()
 
         try:
             db.session.execute(text('ALTER TABLE "user" ADD COLUMN last_active_at TIMESTAMP'))
@@ -4523,7 +4523,6 @@ if __name__ == "__main__":
             print("Auto-migrated: Added last_active_at to user")
         except Exception:
             db.session.rollback()
-            pass
 
         # Auto-migration for Song upgrades
         try:
@@ -4531,21 +4530,21 @@ if __name__ == "__main__":
             db.session.commit()
             print("Auto-migrated: Added duration to song")
         except Exception:
-            pass
+            db.session.rollback()
 
         try:
             db.session.execute(text("ALTER TABLE song ADD COLUMN play_count INTEGER DEFAULT 0"))
             db.session.commit()
             print("Auto-migrated: Added play_count to song")
         except Exception:
-            pass
+            db.session.rollback()
 
         try:
             db.session.execute(text("ALTER TABLE song ADD COLUMN audio_hash VARCHAR(64)"))
             db.session.commit()
             print("Auto-migrated: Added audio_hash to song")
         except Exception:
-            pass
+            db.session.rollback()
             
         # Auto-import songs on startup
         try:
@@ -4576,7 +4575,7 @@ else:
             db.session.commit()
             print("Auto-migrated (Prod): Added duration to song")
         except Exception:
-            pass
+            db.session.rollback()
 
         try:
             from sqlalchemy import text
@@ -4584,7 +4583,7 @@ else:
             db.session.commit()
             print("Auto-migrated (Prod): Added play_count to song")
         except Exception:
-            pass
+            db.session.rollback()
 
         try:
             from sqlalchemy import text
@@ -4592,7 +4591,7 @@ else:
             db.session.commit()
             print("Auto-migrated (Prod): Added audio_hash to song")
         except Exception:
-            pass
+            db.session.rollback()
         try:
             from sqlalchemy import text
             db.session.execute(text('ALTER TABLE "user" ADD COLUMN last_active_at TIMESTAMP'))
