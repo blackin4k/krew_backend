@@ -4518,9 +4518,42 @@ if __name__ == "__main__":
             db.session.rollback()
 
         try:
+            from sqlalchemy import text
             db.session.execute(text('ALTER TABLE "user" ADD COLUMN last_active_at TIMESTAMP'))
             db.session.commit()
             print("Auto-migrated: Added last_active_at to user")
+        except Exception:
+            db.session.rollback()
+
+        try:
+            from sqlalchemy import text
+            db.session.execute(text('ALTER TABLE "user" ADD COLUMN is_supporter BOOLEAN DEFAULT FALSE'))
+            db.session.commit()
+            print("Auto-migrated: Added is_supporter to user")
+        except Exception:
+            db.session.rollback()
+
+        try:
+            from sqlalchemy import text
+            db.session.execute(text('ALTER TABLE "user" ADD COLUMN is_artist BOOLEAN DEFAULT FALSE'))
+            db.session.commit()
+            print("Auto-migrated: Added is_artist to user")
+        except Exception:
+            db.session.rollback()
+
+        try:
+            from sqlalchemy import text
+            db.session.execute(text('ALTER TABLE "user" ADD COLUMN artist_application_date TIMESTAMP'))
+            db.session.commit()
+            print("Auto-migrated: Added artist_application_date to user")
+        except Exception:
+            db.session.rollback()
+
+        try:
+            from sqlalchemy import text
+            db.session.execute(text('ALTER TABLE "user" ADD COLUMN artist_bio TEXT'))
+            db.session.commit()
+            print("Auto-migrated: Added artist_bio to user")
         except Exception:
             db.session.rollback()
 
@@ -4597,6 +4630,38 @@ else:
             db.session.execute(text('ALTER TABLE "user" ADD COLUMN last_active_at TIMESTAMP'))
             db.session.commit()
             print("Auto-migrated (Prod): Added last_active_at to user")
+        except Exception:
+            db.session.rollback()
+
+        try:
+            from sqlalchemy import text
+            db.session.execute(text('ALTER TABLE "user" ADD COLUMN is_supporter BOOLEAN DEFAULT FALSE'))
+            db.session.commit()
+            print("Auto-migrated (Prod): Added is_supporter to user")
+        except Exception:
+            db.session.rollback()
+
+        try:
+            from sqlalchemy import text
+            db.session.execute(text('ALTER TABLE "user" ADD COLUMN is_artist BOOLEAN DEFAULT FALSE'))
+            db.session.commit()
+            print("Auto-migrated (Prod): Added is_artist to user")
+        except Exception:
+            db.session.rollback()
+
+        try:
+            from sqlalchemy import text
+            db.session.execute(text('ALTER TABLE "user" ADD COLUMN artist_application_date TIMESTAMP'))
+            db.session.commit()
+            print("Auto-migrated (Prod): Added artist_application_date to user")
+        except Exception:
+            db.session.rollback()
+
+        try:
+            from sqlalchemy import text
+            db.session.execute(text('ALTER TABLE "user" ADD COLUMN artist_bio TEXT'))
+            db.session.commit()
+            print("Auto-migrated (Prod): Added artist_bio to user")
         except Exception:
             db.session.rollback()
             pass
