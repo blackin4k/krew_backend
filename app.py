@@ -1058,6 +1058,15 @@ class JamSession(db.Model):
     started_at = db.Column(db.DateTime, nullable=True)
     last_active = db.Column(db.DateTime, default=datetime.utcnow)
 
+class SongRequest(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    song = db.Column(db.String(200), nullable=False)
+    artist = db.Column(db.String(200))
+    link = db.Column(db.String(500))
+    notes = db.Column(db.Text)
+    status = db.Column(db.String(20), default='pending')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
 
 # =========================================================
 # AUTO-CREATE DATABASE TABLES ON STARTUP
@@ -1066,9 +1075,62 @@ with app.app_context():
     db.create_all()
     print("✅ Database tables created/verified")
 
-# =========================================================
 # AUTH ROUTES
 # =========================================================
+
+# =========================================================
+# SONG REQUESTS
+# =========================================================
+
+@app.route('/request-song', methods=['POST'])
+def request_song():
+    data = request.json or {}
+
+    song_name = data.get('song', '')
+    if not song_name or len(song_name.strip()) < 2:
+        return jsonify({'error': 'Valid song name required'}), 400
+
+    existing = SongRequest.query.filter_by(song=song_name.strip()).first()
+    if existing:
+        return jsonify({'error': 'Song already requested'}), 400
+
+    new_request = SongRequest(
+        song=song_name.strip(),
+        artist=data.get('artist'),
+        link=data.get('link'),
+        notes=data.get('notes'),
+        status='pending'
+    )
+
+    db.session.add(new_request)
+    db.session.commit()
+
+    return jsonify({
+        'message': 'Request saved successfully',
+        'request': {
+            'song': new_request.song,
+            'artist': new_request.artist,
+            'status': new_request.status
+        }
+    })
+
+
+@app.route('/requests', methods=['GET'])
+def get_requests():
+    requests = SongRequest.query.order_by(SongRequest.created_at.desc()).all()
+
+    return jsonify([
+        {
+            'id': r.id,
+            'song': r.song,
+            'artist': r.artist,
+            'link': r.link,
+            'notes': r.notes,
+            'status': r.status,
+            'created_at': r.created_at.isoformat()
+        } for r in requests
+    ])
+
 
 @app.route("/auth/register", methods=["POST"])
 def register():
@@ -1770,15 +1832,22 @@ def get_playlists():
     user_id = int(get_jwt_identity())
     playlists = Playlist.query.filter_by(owner_id=user_id).all()
 
-    return jsonify([
-        {
+    result = []
+    for p in playlists:
+        songs = (
+            db.session.query(Song)
+            .join(PlaylistSong, Song.id == PlaylistSong.song_id)
+            .filter(PlaylistSong.playlist_id == p.id)
+            .all()
+        )
+        result.append({
             "id": p.id, 
             "name": p.name,
-            "cover": full_url(f"/covers/{p.cover_file}") if p.cover_file else None
-        }
-        for p in playlists
-    ])
+            "cover": p.cover_file,
+            "songs": [{"id": s.id, "cover": s.cover_file} for s in songs]
+        })
 
+    return jsonify(result)
 
 # 3️⃣ Get songs inside a playlist
 @app.route("/playlists/<int:pid>", methods=["GET"])
