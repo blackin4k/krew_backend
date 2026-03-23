@@ -1022,6 +1022,9 @@ class PlaylistSong(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     playlist_id = db.Column(db.Integer, db.ForeignKey('playlist.id'))
     song_id = db.Column(db.Integer, db.ForeignKey('song.id'))
+    __table_args__ = (
+        db.UniqueConstraint('playlist_id', 'song_id'),
+    )
 
 
 
@@ -2492,72 +2495,75 @@ def get_sleep_timer():
 
 @app.route("/search", methods=["GET"])
 def search():
-    query = request.args.get("q", "").strip()
+    q = request.args.get("q", "").strip()
     genre_filter = request.args.get("genre")
+
+    if not q and not genre_filter:
+        return jsonify([])
+
+    # If only genre_filter is provided
+    if not q and genre_filter:
+        genre_matches = Song.query.filter(Song.genre == genre_filter).order_by(func.random()).limit(20).all()
+        return jsonify([
+            {
+                "id": s.id,
+                "title": s.title,
+                "artist": s.artist,
+                "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
+                "audio": get_presigned_url(s.audio_file, "audio") if s.audio_file else None
+            }
+            for s in genre_matches
+        ])
+
+    q_lower = q.lower()
+    query_str = f"%{q_lower}%"
+
+    # Filter songs conditionally if genre is set
+    query = Song.query.filter(
+        or_(
+            Song.title.ilike(query_str),
+            Song.artist.ilike(query_str)
+        )
+    )
+    if genre_filter:
+        query = query.filter(Song.genre == genre_filter)
     
-    if not query and not genre_filter:
-        return jsonify({"results": [], "top_match": None})
+    songs = query.limit(100).all()
 
     results = []
-    seen_ids = set()
 
-    # Helper to add unique
-    def add_songs(songs_list, match_type):
-        added_count = 0
-        for s in songs_list:
-            if s.id not in seen_ids:
-                results.append({
-                    "id": s.id,
-                    "title": s.title,
-                    "artist": s.artist,
-                    "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
-                    "audio": get_presigned_url(s.audio_file, "audio") if s.audio_file else None,
-                    "match_type": match_type
-                })
-                seen_ids.add(s.id)
-                added_count += 1
-        return added_count
+    for s in songs:
+        score = 0
 
-    # 0. Genre Filter (if generic browse)
-    if genre_filter:
-        genre_matches = Song.query.filter(Song.genre == genre_filter).order_by(func.random()).limit(20).all()
-        add_songs(genre_matches, "genre")
-        return jsonify({"results": results, "top_match": None})
+        title = (s.title or "").lower()
+        artist = (s.artist or "").lower()
 
-    # WEIGHTED SEARCH LOGIC
-    
-    # 1. Exact Title Match (Highest Priority)
-    exact_title = Song.query.filter(Song.title.ilike(f"{query}")).all()
-    add_songs(exact_title, "exact_title")
+        # Exact match boost
+        if q_lower in title:
+            score += 50
+        if q_lower in artist:
+            score += 40
 
-    # 2. Exact Artist Match
-    exact_artist = Song.query.filter(Song.artist.ilike(f"{query}")).all()
-    add_songs(exact_artist, "exact_artist")
-    
-    # 3. Starts With Title
-    starts_title = Song.query.filter(Song.title.ilike(f"{query}%")).limit(5).all()
-    add_songs(starts_title, "starts_title")
+        # Fuzzy match
+        score += int(difflib.SequenceMatcher(None, q_lower, title).ratio() * 30)
+        score += int(difflib.SequenceMatcher(None, q_lower, artist).ratio() * 20)
 
-    # 4. Partial Title
-    partial_title = Song.query.filter(Song.title.ilike(f"%{query}%")).limit(10).all()
-    add_songs(partial_title, "partial_title")
-    
-    # 5. Partial Artist
-    partial_artist = Song.query.filter(Song.artist.ilike(f"%{query}%")).limit(10).all()
-    add_songs(partial_artist, "partial_artist")
+        if score > 20:
+            results.append((score, s))
 
-    # EXTRACT TOP MATCH
-    # The first result in our prioritized list is the "Top Match"
-    top_match = results[0] if results else None
-    
-    # If we have a top match, remove it from the main list so it doesn't duplicate visually
-    # OR keep it if frontend handles it. Let's keep distinct.
-    main_results = results[1:] if results else []
+    # Sort by score DESC
+    results.sort(key=lambda x: x[0], reverse=True)
 
-    return jsonify({
-        "top_match": top_match,
-        "results": main_results
-    })
+    return jsonify([
+        {
+            "id": s.id,
+            "title": s.title,
+            "artist": s.artist,
+            "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
+            "audio": get_presigned_url(s.audio_file, "audio") if s.audio_file else None
+        }
+        for score, s in results[:30]
+    ])
 
 
 @app.route("/search/trending", methods=["GET"])
@@ -4627,43 +4633,43 @@ else:
             db.session.rollback()
         try:
             from sqlalchemy import text
-            db.session.execute(text('ALTER TABLE "user" ADD COLUMN last_active_at TIMESTAMP'))
-            db.session.commit()
+            with db.engine.begin() as conn:
+                conn.execute(text('ALTER TABLE "user" ADD COLUMN last_active_at TIMESTAMP'))
             print("Auto-migrated (Prod): Added last_active_at to user")
-        except Exception:
-            db.session.rollback()
+        except Exception as e:
+            print(f"Migration skip (last_active_at): {e}")
 
         try:
             from sqlalchemy import text
-            db.session.execute(text('ALTER TABLE "user" ADD COLUMN is_supporter BOOLEAN DEFAULT FALSE'))
-            db.session.commit()
+            with db.engine.begin() as conn:
+                conn.execute(text('ALTER TABLE "user" ADD COLUMN is_supporter BOOLEAN DEFAULT FALSE'))
             print("Auto-migrated (Prod): Added is_supporter to user")
-        except Exception:
-            db.session.rollback()
+        except Exception as e:
+            print(f"Migration skip (is_supporter): {e}")
 
         try:
             from sqlalchemy import text
-            db.session.execute(text('ALTER TABLE "user" ADD COLUMN is_artist BOOLEAN DEFAULT FALSE'))
-            db.session.commit()
+            with db.engine.begin() as conn:
+                conn.execute(text('ALTER TABLE "user" ADD COLUMN is_artist BOOLEAN DEFAULT FALSE'))
             print("Auto-migrated (Prod): Added is_artist to user")
-        except Exception:
-            db.session.rollback()
+        except Exception as e:
+            print(f"Migration skip (is_artist): {e}")
 
         try:
             from sqlalchemy import text
-            db.session.execute(text('ALTER TABLE "user" ADD COLUMN artist_application_date TIMESTAMP'))
-            db.session.commit()
+            with db.engine.begin() as conn:
+                conn.execute(text('ALTER TABLE "user" ADD COLUMN artist_application_date TIMESTAMP'))
             print("Auto-migrated (Prod): Added artist_application_date to user")
-        except Exception:
-            db.session.rollback()
+        except Exception as e:
+            print(f"Migration skip (artist_application_date): {e}")
 
         try:
             from sqlalchemy import text
-            db.session.execute(text('ALTER TABLE "user" ADD COLUMN artist_bio TEXT'))
-            db.session.commit()
+            with db.engine.begin() as conn:
+                conn.execute(text('ALTER TABLE "user" ADD COLUMN artist_bio TEXT'))
             print("Auto-migrated (Prod): Added artist_bio to user")
-        except Exception:
-            db.session.rollback()
+        except Exception as e:
+            print(f"Migration skip (artist_bio): {e}")
             pass
             
         try:
