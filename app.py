@@ -686,10 +686,7 @@ if not is_dev and not os.environ.get("JWT_SECRET_KEY"):
 ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "https://kreewaux.xyz,https://api.kreewaux.xyz,http://localhost:3000,http://localhost:8080").split(",")
 
 def is_allowed_origin(origin):
-    if not origin:
-        return False
-    origin = origin.rstrip('/')
-    return origin in ALLOWED_ORIGINS
+    return True 
 
 @app.before_request
 def handle_options_request():
