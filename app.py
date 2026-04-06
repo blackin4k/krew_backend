@@ -73,15 +73,18 @@ if database_url:
         separator = "&" if "?" in database_url else "?"
         database_url += f"{separator}sslmode=require"
     app.config["SQLALCHEMY_DATABASE_URI"] = database_url
-    # FIX: Use NullPool to prevent "SSL error: decryption failed or bad record mac"
-    # Root cause: Supabase's PgBouncer (pooler endpoint) reassigns backend postgres
-    # connections between requests. psycopg2 caches SSL session state, so when
-    # SQLAlchemy reuses a pooled connection whose backend was swapped by PgBouncer,
-    # the SSL MAC check fails. NullPool creates a fresh connection (fresh SSL
-    # handshake) for every request, letting PgBouncer handle all pooling.
-    from sqlalchemy.pool import NullPool
+    # FIX for "SSL error: decryption failed or bad record mac" with Supabase pooler:
+    # Supabase's PgBouncer reassigns backend connections, so cached SSL sessions go
+    # stale. pool_pre_ping detects dead connections before use, pool_recycle discards
+    # them before Supabase's ~300s timeout kills them.
+    # NOTE: NullPool (fresh connection per query) is too expensive under gevent — each
+    # new TCP+SSL handshake to Supabase takes 100-300ms and blocks the greenlet.
     app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
-        "poolclass": NullPool,
+        "pool_pre_ping": True,       # Test connection before use (drops dead SSL)
+        "pool_recycle": 270,          # Discard connections older than 270s (before Supabase kills @300s)
+        "pool_size": 3,              # Small pool for free-tier memory
+        "max_overflow": 2,           # Allow 2 extra during bursts
+        "pool_reset_on_return": "rollback",  # Clean state on return
     }
 else:
     # Local development uses SQLite
@@ -4445,16 +4448,15 @@ def sync_r2_songs():
 
 def keep_alive_ping():
     """Pings the backend health endpoint every 10 minutes to prevent sleeping."""
-    # Wait for the server to start
-    time.sleep(10)
+    # Wait long enough for gunicorn worker to fully boot + DB pool to warm
+    time.sleep(30)
     url = "https://api.kreewaux.xyz/health"
-    print(f"🚀 Keep-alive thread started, targeting {url}")
+    print(f"🚀 Keep-alive thread started, pinging {url} every 10 min")
     
     while True:
         try:
-            # We don't care about the response, just that the request hit the server
-            requests.get(url, timeout=10)
-            print(f"📡 Keep-alive ping sent to {url}")
+            requests.get(url, timeout=15)
+            # Don't spam stdout on success — only log failures
         except Exception as e:
             print(f"⚠️ Keep-alive ping failed: {e}")
         time.sleep(600)  # 10 minutes
