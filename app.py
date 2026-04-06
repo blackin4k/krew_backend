@@ -1,4 +1,4 @@
- # =========================================================
+ṣ # =========================================================
 # KREW -BACKEND — VERSION 3
 # =========================================================
 
@@ -68,7 +68,21 @@ if database_url:
     # Render provides DATABASE_URL, but it starts with postgres:// instead of postgresql://
     if database_url.startswith("postgres://"):
         database_url = database_url.replace("postgres://", "postgresql://", 1)
+    # Ensure sslmode=require for Supabase connections
+    if "sslmode" not in database_url:
+        separator = "&" if "?" in database_url else "?"
+        database_url += f"{separator}sslmode=require"
     app.config["SQLALCHEMY_DATABASE_URI"] = database_url
+    # FIX: Use NullPool to prevent "SSL error: decryption failed or bad record mac"
+    # Root cause: Supabase's PgBouncer (pooler endpoint) reassigns backend postgres
+    # connections between requests. psycopg2 caches SSL session state, so when
+    # SQLAlchemy reuses a pooled connection whose backend was swapped by PgBouncer,
+    # the SSL MAC check fails. NullPool creates a fresh connection (fresh SSL
+    # handshake) for every request, letting PgBouncer handle all pooling.
+    from sqlalchemy.pool import NullPool
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+        "poolclass": NullPool,
+    }
 else:
     # Local development uses SQLite
     app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{os.path.join(INSTANCE_DIR, 'db.sqlite3')}"
