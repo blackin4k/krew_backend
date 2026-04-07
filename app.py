@@ -153,6 +153,27 @@ s3_client = boto3.client(
     region_name="auto"
 )
 
+# Configure CORS on R2 bucket so Web Audio API (createMediaElementSource)
+# can analyze audio streams on Android/mobile without CORS tainting.
+try:
+    s3_client.put_bucket_cors(
+        Bucket=R2_BUCKET_NAME,
+        CORSConfiguration={
+            'CORSRules': [
+                {
+                    'AllowedOrigins': ['*'],
+                    'AllowedMethods': ['GET', 'HEAD'],
+                    'AllowedHeaders': ['*'],
+                    'ExposeHeaders': ['Content-Length', 'Content-Type', 'Content-Range', 'Accept-Ranges'],
+                    'MaxAgeSeconds': 86400
+                }
+            ]
+        }
+    )
+    print("✅ R2 bucket CORS configured (Allow-Origin: *)")
+except Exception as e:
+    print(f"⚠️ R2 CORS config skipped: {e}")
+
 def extract_metadata(file_path):
     """
     Extracts title, artist, album, genre from audio file using mutagen.
@@ -3082,6 +3103,40 @@ def autoplay_fill(state):
             shuffled = []
         shuffled.extend(new_ids)
         state.shuffled_queue = json.dumps(shuffled)
+
+@app.route("/player/queue", methods=["GET"])
+@jwt_required()
+def get_player_queue():
+    user_id = int(get_jwt_identity())
+    state = get_player(user_id)
+    
+    try:
+        if state.shuffle:
+            q_ids = json.loads(state.shuffled_queue or "[]")
+        else:
+            q_ids = json.loads(state.original_queue or "[]")
+    except:
+        q_ids = []
+
+    if not q_ids:
+        return jsonify(queue=[])
+
+    # Fetch song metadata for the queue
+    songs = []
+    # Bulk fetch songs to avoid N+1 queries
+    song_objects = {s.id: s for s in Song.query.filter(Song.id.in_(q_ids)).all()}
+    
+    for sid in q_ids:
+        s = song_objects.get(sid)
+        if s:
+            songs.append({
+                "id": s.id,
+                "title": s.title,
+                "artist": s.artist,
+                "cover": get_presigned_url(s.cover_path, "covers") if s.cover_path else None
+            })
+
+    return jsonify(queue=songs)
 
 @app.route("/player/queue/add", methods=["POST"])
 @jwt_required()
