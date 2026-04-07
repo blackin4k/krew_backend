@@ -405,6 +405,11 @@ def player_play_top():
          state = PlaybackState(user_id=user_id)
          db.session.add(state)
 
+    if data.get("autoplay_mode") is not None:
+        if data["autoplay_mode"] not in {"focused", "discovery"}:
+            return jsonify(error="autoplay_mode must be 'focused' or 'discovery'"), 400
+        state.autoplay_mode = data["autoplay_mode"]
+
     # 1. Update History (Push OLD song)
     if state.current_song_id and state.current_song_id != song_id:
         try:
@@ -445,7 +450,8 @@ def player_play_top():
         "title": song.title,
         "artist": song.artist,
         "cover": cover_url,
-        "audio": audio_url
+        "audio": audio_url,
+        "autoplay_mode": _normalized_autoplay_mode(state.autoplay_mode)
     })
 
 @app.route("/player/next", methods=["POST"])
@@ -1055,6 +1061,7 @@ class PlaybackState(db.Model):
 
     shuffle = db.Column(db.Boolean, default=False)
     repeat = db.Column(db.String(10), default="off")  # off | all | one
+    autoplay_mode = db.Column(db.String(20), default="focused")  # focused | discovery
 
     original_queue = db.Column(db.Text, default="[]")   # JSON list
     shuffled_queue = db.Column(db.Text, default="[]")   # JSON list
@@ -2179,6 +2186,28 @@ def player_repeat():
     return jsonify(msg="Repeat set", mode=mode)
 
 
+@app.route("/player/autoplay-mode", methods=["POST"])
+@jwt_required()
+def player_autoplay_mode():
+    user_id = int(get_jwt_identity())
+    data = request.json or {}
+    mode = data.get("mode")
+    if mode not in {"focused", "discovery"}:
+        return jsonify(error="mode must be 'focused' or 'discovery'"), 400
+
+    state = get_player(user_id)
+    state.autoplay_mode = mode
+
+    if data.get("refresh_queue") and state.current_song_id:
+        state.original_queue = "[]"
+        if state.shuffle:
+            state.shuffled_queue = "[]"
+        autoplay_fill(state)
+
+    db.session.commit()
+    return jsonify(msg="Autoplay mode updated", mode=mode)
+
+
 @app.route("/player/state")
 @jwt_required()
 def player_state():
@@ -2197,7 +2226,8 @@ def player_state():
             } if song else None
         ),
         "shuffle": state.shuffle,
-        "repeat": state.repeat
+        "repeat": state.repeat,
+        "autoplay_mode": _normalized_autoplay_mode(state.autoplay_mode)
     })
 
 @app.route("/songs/<int:sid>/liked")
@@ -2795,6 +2825,58 @@ def _genre_family(genre):
     return genre_text
 
 
+def _normalized_autoplay_mode(mode):
+    return mode if mode in {"focused", "discovery"} else "focused"
+
+
+def _has_artist_context(seed_song, candidate):
+    if seed_song.artist and candidate.artist and seed_song.artist.lower() == candidate.artist.lower():
+        return True
+    return bool(_artist_tokens(seed_song.artist) & _artist_tokens(candidate.artist))
+
+
+def _has_genre_context(seed_song, candidate):
+    if not seed_song.genre or not candidate.genre:
+        return False
+    if seed_song.genre.lower() == candidate.genre.lower():
+        return True
+
+    seed_family = _genre_family(seed_song.genre)
+    candidate_family = _genre_family(candidate.genre)
+    return bool(seed_family and seed_family == candidate_family)
+
+
+def _is_market_compatible(seed_song, candidate):
+    seed_market = _detect_song_market(seed_song)
+    candidate_market = _detect_song_market(candidate)
+    return not (
+        seed_market != "unknown"
+        and candidate_market != "unknown"
+        and seed_market != candidate_market
+    )
+
+
+def _is_focused_autoplay_match(seed_song, candidate):
+    if not _is_market_compatible(seed_song, candidate):
+        return False
+
+    if seed_song.album and candidate.album and seed_song.album.lower() == candidate.album.lower():
+        return True
+
+    if _has_artist_context(seed_song, candidate):
+        return True
+
+    if _has_genre_context(seed_song, candidate):
+        return True
+
+    seed_market = _detect_song_market(seed_song)
+    candidate_market = _detect_song_market(candidate)
+    if seed_market != "unknown" and seed_market == candidate_market and _candidate_score(seed_song, candidate) >= 20:
+        return True
+
+    return False
+
+
 def _candidate_score(seed_song, candidate):
     score = 0
 
@@ -2833,20 +2915,83 @@ def _candidate_score(seed_song, candidate):
     return score
 
 
-def _rank_autoplay_candidates(seed_song, candidates, limit=10):
+def _rank_autoplay_candidates(seed_song, candidates, limit=10, min_score=-40):
     ranked = []
     for candidate in candidates:
         score = _candidate_score(seed_song, candidate)
         ranked.append((score, random.random(), candidate))
 
     ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return [candidate for score, _, candidate in ranked[:limit] if score > -40]
+    return [candidate for score, _, candidate in ranked[:limit] if score >= min_score]
+
+
+def _recommendation_reason_payload(candidate, seed_song=None, top_artists=None):
+    top_artists = [artist for artist in (top_artists or []) if artist]
+
+    if seed_song:
+        seed_artist = seed_song.artist or "your recent artist"
+        seed_title = seed_song.title or "your recent track"
+
+        if seed_song.artist and candidate.artist and seed_song.artist.lower() == candidate.artist.lower():
+            return {
+                "reason": f"Because you played {seed_artist}",
+                "reason_type": "same_artist"
+            }
+
+        shared_artist_tokens = _artist_tokens(seed_song.artist) & _artist_tokens(candidate.artist)
+        if shared_artist_tokens:
+            return {
+                "reason": f"Artist connection to {seed_artist}",
+                "reason_type": "related_artist"
+            }
+
+        if seed_song.genre and candidate.genre:
+            if seed_song.genre.lower() == candidate.genre.lower():
+                return {
+                    "reason": f"Same {candidate.genre} vibe as {seed_title}",
+                    "reason_type": "same_genre"
+                }
+
+            seed_family = _genre_family(seed_song.genre)
+            candidate_family = _genre_family(candidate.genre)
+            if seed_family and seed_family == candidate_family:
+                return {
+                    "reason": f"Similar vibe to {seed_title}",
+                    "reason_type": "similar_genre"
+                }
+
+        seed_market = _detect_song_market(seed_song)
+        candidate_market = _detect_song_market(candidate)
+        if seed_market != "unknown" and candidate_market == seed_market:
+            return {
+                "reason": f"Same listening lane as {seed_title}",
+                "reason_type": "market_match"
+            }
+
+    if candidate.artist and any(candidate.artist.lower() == artist.lower() for artist in top_artists):
+        return {
+            "reason": f"From one of your top artists, {candidate.artist}",
+            "reason_type": "top_artist"
+        }
+
+    if candidate.genre and candidate.genre.lower() not in {"unknown", "other", "import", "single", "undefined"}:
+        return {
+            "reason": f"Popular in your {candidate.genre} lane",
+            "reason_type": "popular_genre"
+        }
+
+    return {
+        "reason": "Popular with listeners right now",
+        "reason_type": "popular"
+    }
 
 
 def autoplay_fill(state):
     last_song = Song.query.get(state.current_song_id)
     if not last_song:
         return
+
+    autoplay_mode = _normalized_autoplay_mode(getattr(state, "autoplay_mode", None))
 
     try:
         queue = json.loads(state.original_queue)
@@ -2880,23 +3025,47 @@ def autoplay_fill(state):
         soft_excluded_ids.add(p.song_id)
 
     strict_excluded_ids = hard_excluded_ids | soft_excluded_ids
+    strict_candidates = Song.query.filter(Song.id.notin_(strict_excluded_ids)).all()
 
-    related = _rank_autoplay_candidates(
-        last_song,
-        Song.query.filter(Song.id.notin_(strict_excluded_ids)).all(),
-        limit=10
-    )
-
-    # If history/recent plays consume too much of a small catalog, relax the soft exclusions.
-    if len(related) < 10:
-        seen_ids = strict_excluded_ids | {song.id for song in related}
-        relaxed_candidates = [
-            song for song in Song.query.filter(Song.id.notin_(hard_excluded_ids)).all()
-            if song.id not in seen_ids
-        ]
-        related.extend(
-            _rank_autoplay_candidates(last_song, relaxed_candidates, limit=10 - len(related))
+    if autoplay_mode == "focused":
+        related = _rank_autoplay_candidates(
+            last_song,
+            [song for song in strict_candidates if _is_focused_autoplay_match(last_song, song)],
+            limit=10,
+            min_score=15
         )
+
+        if len(related) < 10:
+            seen_ids = strict_excluded_ids | {song.id for song in related}
+            relaxed_candidates = [
+                song for song in Song.query.filter(Song.id.notin_(hard_excluded_ids)).all()
+                if song.id not in seen_ids and _is_market_compatible(last_song, song)
+            ]
+            related.extend(
+                _rank_autoplay_candidates(
+                    last_song,
+                    relaxed_candidates,
+                    limit=10 - len(related),
+                    min_score=0
+                )
+            )
+    else:
+        related = _rank_autoplay_candidates(
+            last_song,
+            strict_candidates,
+            limit=10
+        )
+
+        # If history/recent plays consume too much of a small catalog, relax the soft exclusions.
+        if len(related) < 10:
+            seen_ids = strict_excluded_ids | {song.id for song in related}
+            relaxed_candidates = [
+                song for song in Song.query.filter(Song.id.notin_(hard_excluded_ids)).all()
+                if song.id not in seen_ids
+            ]
+            related.extend(
+                _rank_autoplay_candidates(last_song, relaxed_candidates, limit=10 - len(related))
+            )
 
     if not related:
         return
@@ -3745,6 +3914,17 @@ def on_disconnect():
 @jwt_required()
 def recommendations():
     user_id = int(get_jwt_identity())
+    state = PlaybackState.query.filter_by(user_id=user_id).first()
+    seed_song = Song.query.get(state.current_song_id) if state and state.current_song_id else None
+
+    if not seed_song:
+        recent_play = (
+            PlayLog.query
+            .filter_by(user_id=user_id)
+            .order_by(PlayLog.played_at.desc())
+            .first()
+        )
+        seed_song = Song.query.get(recent_play.song_id) if recent_play else None
 
     top_artists = (
         db.session.query(Song.artist)
@@ -3780,7 +3960,12 @@ def recommendations():
             "title": s.title, 
             "artist": s.artist, 
             "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None,
-            "audio_url": get_presigned_url(s.audio_file, "audio") if s.audio_file else None
+            "audio_url": get_presigned_url(s.audio_file, "audio") if s.audio_file else None,
+            **_recommendation_reason_payload(
+                s,
+                seed_song=seed_song,
+                top_artists=artist_names
+            )
         }
         for s in songs
     ])
@@ -4711,6 +4896,13 @@ if __name__ == "__main__":
             print("Auto-migrated: Added audio_hash to song")
         except Exception:
             db.session.rollback()
+
+        try:
+            db.session.execute(text("ALTER TABLE playback_state ADD COLUMN autoplay_mode VARCHAR(20) DEFAULT 'focused'"))
+            db.session.commit()
+            print("Auto-migrated: Added autoplay_mode to playback_state")
+        except Exception:
+            db.session.rollback()
             
         # Auto-import songs on startup
         try:
@@ -4758,6 +4950,15 @@ else:
             print("Auto-migrated (Prod): Added audio_hash to song")
         except Exception:
             db.session.rollback()
+
+        try:
+            from sqlalchemy import text
+            with db.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE playback_state ADD COLUMN autoplay_mode VARCHAR(20) DEFAULT 'focused'"))
+            print("Auto-migrated (Prod): Added autoplay_mode to playback_state")
+        except Exception as e:
+            print(f"Migration skip (autoplay_mode): {e}")
+
         try:
             from sqlalchemy import text
             with db.engine.begin() as conn:
