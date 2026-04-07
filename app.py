@@ -11,6 +11,7 @@ import math
 import time
 import json
 import uuid
+import re
 import threading
 import requests
 from datetime import datetime, timedelta
@@ -2686,6 +2687,161 @@ def get_active_queue(state):
     return [s.id for s in songs]
 
 
+STOPWORDS = {
+    "and", "artist", "feat", "featuring", "ft", "mix", "remix", "song",
+    "the", "unknown", "with", "x"
+}
+
+SCRIPT_KEYWORDS = {
+    "telugu": {"telugu", "tollywood"},
+    "tamil": {"tamil", "kollywood"},
+    "punjabi": {"punjabi"},
+    "hindi": {"hindi", "bollywood"},
+    "latin": {"english", "hip hop", "hip-hop", "pop", "rap", "r&b", "rnb", "afrobeats"}
+}
+
+GENRE_FAMILIES = {
+    "hiphop": {"hip hop", "hip-hop", "rap", "trap", "drill"},
+    "rnb": {"r&b", "rnb", "soul"},
+    "pop": {"pop", "dance", "electropop", "synthpop"},
+    "rock": {"rock", "alternative", "indie rock", "metal", "punk"},
+    "electronic": {"edm", "house", "techno", "electronic", "dancehall"},
+    "indian-cinema": {"bollywood", "tollywood", "kollywood", "filmi", "hindi", "telugu", "tamil"},
+}
+
+
+def _clean_token(token):
+    return re.sub(r"[^a-z0-9]+", " ", (token or "").lower()).strip()
+
+
+def _tokenize_text(*parts):
+    tokens = set()
+    for part in parts:
+        cleaned = _clean_token(part)
+        if not cleaned:
+            continue
+        for piece in cleaned.split():
+            if len(piece) >= 2 and piece not in STOPWORDS:
+                tokens.add(piece)
+    return tokens
+
+
+def _artist_tokens(artist_name):
+    if not artist_name:
+        return set()
+
+    parts = [
+        p.strip() for p in re.split(
+            r",|/|&|\bx\b|\bfeat\.?\b|\bfeaturing\b|\bft\.?\b",
+            artist_name,
+            flags=re.IGNORECASE
+        ) if p.strip()
+    ]
+    return _tokenize_text(*parts)
+
+
+def _detect_script_bucket(text):
+    if not text:
+        return "unknown"
+
+    saw_latin = False
+    for ch in text:
+        code = ord(ch)
+        if 0x0C00 <= code <= 0x0C7F:
+            return "telugu"
+        if 0x0B80 <= code <= 0x0BFF:
+            return "tamil"
+        if 0x0900 <= code <= 0x097F:
+            return "devanagari"
+        if ch.isascii() and ch.isalpha():
+            saw_latin = True
+
+    return "latin" if saw_latin else "unknown"
+
+
+def _detect_song_market(song):
+    merged = " ".join([
+        song.title or "",
+        song.artist or "",
+        song.album or "",
+        song.genre or ""
+    ]).lower()
+
+    script_bucket = _detect_script_bucket(merged)
+    if script_bucket in {"telugu", "tamil"}:
+        return script_bucket
+    if script_bucket == "devanagari":
+        return "hindi"
+
+    for market, keywords in SCRIPT_KEYWORDS.items():
+        if any(keyword in merged for keyword in keywords):
+            return market
+
+    if script_bucket == "latin":
+        return "latin"
+
+    return "unknown"
+
+
+def _genre_family(genre):
+    genre_text = (genre or "").lower()
+    if not genre_text or genre_text in {"unknown", "other", "import", "single", "undefined"}:
+        return None
+
+    for family, labels in GENRE_FAMILIES.items():
+        if any(label in genre_text for label in labels):
+            return family
+
+    return genre_text
+
+
+def _candidate_score(seed_song, candidate):
+    score = 0
+
+    seed_artist_tokens = _artist_tokens(seed_song.artist)
+    candidate_artist_tokens = _artist_tokens(candidate.artist)
+    shared_artist_tokens = seed_artist_tokens & candidate_artist_tokens
+
+    if seed_song.artist and candidate.artist and seed_song.artist.lower() == candidate.artist.lower():
+        score += 120
+    elif shared_artist_tokens:
+        score += 45 + (10 * len(shared_artist_tokens))
+
+    if seed_song.album and candidate.album and seed_song.album.lower() == candidate.album.lower():
+        score += 24
+
+    if seed_song.genre and candidate.genre:
+        if seed_song.genre.lower() == candidate.genre.lower():
+            score += 60
+        elif _genre_family(seed_song.genre) and _genre_family(seed_song.genre) == _genre_family(candidate.genre):
+            score += 32
+
+    seed_market = _detect_song_market(seed_song)
+    candidate_market = _detect_song_market(candidate)
+    if seed_market != "unknown" and candidate_market == seed_market:
+        score += 36
+    elif seed_market != "unknown" and candidate_market != "unknown" and candidate_market != seed_market:
+        score -= 80
+
+    title_overlap = _tokenize_text(seed_song.title) & _tokenize_text(candidate.title)
+    if title_overlap:
+        score += min(12, 4 * len(title_overlap))
+
+    if candidate.play_count:
+        score += min(10, candidate.play_count // 10)
+
+    return score
+
+
+def _rank_autoplay_candidates(seed_song, candidates, limit=10):
+    ranked = []
+    for candidate in candidates:
+        score = _candidate_score(seed_song, candidate)
+        ranked.append((score, random.random(), candidate))
+
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [candidate for score, _, candidate in ranked[:limit] if score > -40]
+
 
 def autoplay_fill(state):
     last_song = Song.query.get(state.current_song_id)
@@ -2697,17 +2853,18 @@ def autoplay_fill(state):
     except:
         queue = []
         
-    existing_ids = set(queue)
+    hard_excluded_ids = set(queue)
+    soft_excluded_ids = set()
 
     # 1. Explicitly exclude current song
     if state.current_song_id:
-        existing_ids.add(state.current_song_id)
+        hard_excluded_ids.add(state.current_song_id)
 
     # 2. Exclude history to prevent skipped songs from immediately repeating
     try:
         hist = json.loads(state.history or "[]")
         for h_id in hist:
-            existing_ids.add(h_id)
+            soft_excluded_ids.add(h_id)
     except:
         pass
 
@@ -2720,72 +2877,29 @@ def autoplay_fill(state):
         .all()
     )
     for p in recent_plays:
-        existing_ids.add(p.song_id)
+        soft_excluded_ids.add(p.song_id)
 
-    # Base the vibe exclusively on the currently playing song
-    import re
-    artists_set = set()
-    genres_set = set()
-    
-    if last_song.artist:
-        parts = [a.strip() for a in re.split(r'[,&]|\sfeat\.|\sft\.', last_song.artist, flags=re.IGNORECASE) if a.strip()]
-        for p in parts:
-            if p.lower() not in ['unknown artist', 'unknown']:
-                artists_set.add(p)
-                
-    if last_song.genre and last_song.genre.lower() not in ['unknown', 'import', 'other', 'single', 'undefined']:
-        genres_set.add(last_song.genre)
+    strict_excluded_ids = hard_excluded_ids | soft_excluded_ids
 
-    related = []
-    
-    # Slot 1: Same Artist (max 3 songs to prevent getting trapped)
-    if artists_set:
-        artist_filters = [Song.artist.ilike(f"%{a}%") for a in artists_set]
-        artist_songs = (
-            Song.query
-            .filter(or_(*artist_filters))
-            .filter(Song.id.notin_(existing_ids))
-            .order_by(func.random())
-            .limit(3)
-            .all()
-        )
-        related.extend(artist_songs)
+    related = _rank_autoplay_candidates(
+        last_song,
+        Song.query.filter(Song.id.notin_(strict_excluded_ids)).all(),
+        limit=10
+    )
 
-    # Slot 2: Same Genre (up to 4 songs to keep the general feel)
-    if len(related) < 7 and genres_set:
-        genre_filters = [Song.genre == g for g in genres_set]
-        ignore_ids = [s.id for s in related] if related else [-1]
-        
-        genre_songs = (
-            Song.query
-            .filter(or_(*genre_filters))
-            .filter(Song.id.notin_(existing_ids))
-            .filter(~Song.id.in_(ignore_ids))
-            .order_by(func.random())
-            .limit(7 - len(related))
-            .all()
-        )
-        related.extend(genre_songs)
-
-    # Slot 3: Completely Random (fill remaining up to 10 for true discovery)
+    # If history/recent plays consume too much of a small catalog, relax the soft exclusions.
     if len(related) < 10:
-        ignore_ids = [s.id for s in related] if related else [-1]
-        random_songs = (
-            Song.query
-            .filter(Song.id.notin_(existing_ids))
-            .filter(~Song.id.in_(ignore_ids))
-            .order_by(func.random())
-            .limit(10 - len(related))
-            .all()
+        seen_ids = strict_excluded_ids | {song.id for song in related}
+        relaxed_candidates = [
+            song for song in Song.query.filter(Song.id.notin_(hard_excluded_ids)).all()
+            if song.id not in seen_ids
+        ]
+        related.extend(
+            _rank_autoplay_candidates(last_song, relaxed_candidates, limit=10 - len(related))
         )
-        related.extend(random_songs)
 
     if not related:
         return
-
-    # Shuffle related to interleave artists and prevent "lumps" of the same artist
-    import random
-    random.shuffle(related)
 
     new_ids = [s.id for s in related]
     queue.extend(new_ids)
