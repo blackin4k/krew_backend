@@ -155,24 +155,24 @@ s3_client = boto3.client(
 
 # Configure CORS on R2 bucket so Web Audio API (createMediaElementSource)
 # can analyze audio streams on Android/mobile without CORS tainting.
-try:
-    s3_client.put_bucket_cors(
-        Bucket=R2_BUCKET_NAME,
-        CORSConfiguration={
-            'CORSRules': [
-                {
-                    'AllowedOrigins': ['*'],
-                    'AllowedMethods': ['GET', 'HEAD'],
-                    'AllowedHeaders': ['*'],
-                    'ExposeHeaders': ['Content-Length', 'Content-Type', 'Content-Range', 'Accept-Ranges'],
-                    'MaxAgeSeconds': 86400
-                }
-            ]
-        }
-    )
-    print("✅ R2 bucket CORS configured (Allow-Origin: *)")
-except Exception as e:
-    print(f"⚠️ R2 CORS config skipped: {e}")
+# try:
+#     s3_client.put_bucket_cors(
+#         Bucket=R2_BUCKET_NAME,
+#         CORSConfiguration={
+#             'CORSRules': [
+#                 {
+#                     'AllowedOrigins': ['*'],
+#                     'AllowedMethods': ['GET', 'HEAD'],
+#                     'AllowedHeaders': ['*'],
+#                     'ExposeHeaders': ['Content-Length', 'Content-Type', 'Content-Range', 'Accept-Ranges'],
+#                     'MaxAgeSeconds': 86400
+#                 }
+#             ]
+#         }
+#     )
+#     print("✅ R2 bucket CORS configured (Allow-Origin: *)")
+# except Exception as e:
+#     print(f"⚠️ R2 CORS config skipped: {e}")
 
 def extract_metadata(file_path):
     """
