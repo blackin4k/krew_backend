@@ -21,7 +21,6 @@ from collections import defaultdict, Counter
 from flask_jwt_extended import decode_token
 from sqlalchemy import or_, func, case, desc
 import boto3 # Added for R2
-from sync_to_render import sync_songs # Added for Auto-Sync
 from dotenv import load_dotenv
 load_dotenv() # Load environment variables
 
@@ -209,7 +208,6 @@ def background_sync(audio_path, r2_audio_key, cover_path, r2_cover_key):
             upload_to_r2(audio_path, r2_audio_key)
         if cover_path:
             upload_to_r2(cover_path, r2_cover_key)
-        sync_songs()
     except Exception as e:
         print(f"❌ Background Sync Failed: {e}")
 
@@ -4120,6 +4118,7 @@ with app.app_context():
         auto_import_songs()
 
 if __name__ == "__main__":
+    sync_songs()
     with app.app_context():
         db.create_all()
         # Auto-migration for cover_file
@@ -4629,172 +4628,172 @@ def get_capsule_stats():
 # =========================================================
 # R2 SYNC (For Render)
 # =========================================================
-def sync_r2_songs():
-    """
-    Syncs songs from Cloudflare R2 bucket to the database.
-    Required Env Vars: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME
-    """
-    try:
-        import boto3
-        from botocore.config import Config
-    except ImportError:
-        print("⚠️ boto3 not installed. Skipping R2 sync.")
-        return
+# def sync_r2_songs():
+#     """
+#     Syncs songs from Cloudflare R2 bucket to the database.
+#     Required Env Vars: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME
+#     """
+#     try:
+#         import boto3
+#         from botocore.config import Config
+#     except ImportError:
+#         print("⚠️ boto3 not installed. Skipping R2 sync.")
+#         return
 
-    r2_account_id = os.environ.get("R2_ACCOUNT_ID")
-    r2_access_key = os.environ.get("R2_ACCESS_KEY_ID")
-    r2_secret_key = os.environ.get("R2_SECRET_ACCESS_KEY")
-    r2_bucket_name = os.environ.get("R2_BUCKET_NAME")
+#     r2_account_id = os.environ.get("R2_ACCOUNT_ID")
+#     r2_access_key = os.environ.get("R2_ACCESS_KEY_ID")
+#     r2_secret_key = os.environ.get("R2_SECRET_ACCESS_KEY")
+#     r2_bucket_name = os.environ.get("R2_BUCKET_NAME")
 
-    # If credentials are missing, we skip (it might be local dev)
-    if not all([r2_account_id, r2_access_key, r2_secret_key, r2_bucket_name]):
-        if os.environ.get("FLASK_ENV") == "production":
-            print("⚠️ R2 credentials missing in production. Skipping R2 sync.")
-        return
+#     # If credentials are missing, we skip (it might be local dev)
+#     if not all([r2_account_id, r2_access_key, r2_secret_key, r2_bucket_name]):
+#         if os.environ.get("FLASK_ENV") == "production":
+#             print("⚠️ R2 credentials missing in production. Skipping R2 sync.")
+#         return
 
-    print(f"🔄 Starting R2 Sync from bucket: {r2_bucket_name}")
+#     print(f"🔄 Starting R2 Sync from bucket: {r2_bucket_name}")
 
-    try:
-        s3 = boto3.client('s3',
-            endpoint_url=os.environ.get("R2_ENDPOINT_URL"),
-            aws_access_key_id=os.environ.get("R2_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.environ.get("R2_SECRET_ACCESS_KEY"),
-            region_name="auto"
-        )
+#     try:
+#         s3 = boto3.client('s3',
+#             endpoint_url=os.environ.get("R2_ENDPOINT_URL"),
+#             aws_access_key_id=os.environ.get("R2_ACCESS_KEY_ID"),
+#             aws_secret_access_key=os.environ.get("R2_SECRET_ACCESS_KEY"),
+#             region_name="auto"
+#         )
         
-        paginator = s3.get_paginator('list_objects_v2')
+#         paginator = s3.get_paginator('list_objects_v2')
         
-        # 1. Scan for Covers first (to match efficiently)
-        r2_covers = set()
-        print("🔄 Scanning R2 Covers...")
-        for page in paginator.paginate(Bucket=r2_bucket_name, Prefix='covers/'):
-            if 'Contents' in page:
-                for obj in page['Contents']:
-                    if obj['Key'].lower().endswith(('.jpg', '.jpeg', '.png')):
-                        r2_covers.add(obj['Key'])
-        print(f"   -> Found {len(r2_covers)} covers.")
+#         # 1. Scan for Covers first (to match efficiently)
+#         r2_covers = set()
+#         print("🔄 Scanning R2 Covers...")
+#         for page in paginator.paginate(Bucket=r2_bucket_name, Prefix='covers/'):
+#             if 'Contents' in page:
+#                 for obj in page['Contents']:
+#                     if obj['Key'].lower().endswith(('.jpg', '.jpeg', '.png')):
+#                         r2_covers.add(obj['Key'])
+#         print(f"   -> Found {len(r2_covers)} covers.")
 
-        # 2. Scan for Audio
-        print(f"🔄 Starting R2 Sync from bucket: {r2_bucket_name}")
-        pages = paginator.paginate(Bucket=r2_bucket_name, Prefix='audio/')
+#         # 2. Scan for Audio
+#         print(f"🔄 Starting R2 Sync from bucket: {r2_bucket_name}")
+#         pages = paginator.paginate(Bucket=r2_bucket_name, Prefix='audio/')
         
-        current_files = set()
-        count = 0
+#         current_files = set()
+#         count = 0
 
-        for page in pages:
-            if 'Contents' not in page:
-                continue
+#         for page in pages:
+#             if 'Contents' not in page:
+#                 continue
             
-            for obj in page['Contents']:
-                file_key = obj['Key']
-                # file_key is "audio/filename.mp3"
-                if not file_key.lower().endswith('.mp3'):
-                    continue
+#             for obj in page['Contents']:
+#                 file_key = obj['Key']
+#                 # file_key is "audio/filename.mp3"
+#                 if not file_key.lower().endswith('.mp3'):
+#                     continue
                 
-                filename = os.path.basename(file_key)
-                current_files.add(filename)
+#                 filename = os.path.basename(file_key)
+#                 current_files.add(filename)
                 
-                # Check if exists in DB (Case-insensitive check is safer)
-                exists = Song.query.filter(func.lower(Song.audio_file) == filename.lower()).first()
-                if exists:
-                    if not exists.cover_file:
-                        basename_no_ext = os.path.splitext(filename)[0]
-                        cover_key = None
-                        search_bases = [
-                            basename_no_ext,
-                            basename_no_ext.replace(" ", "_"),
-                            basename_no_ext.replace(" ", "-"),
-                        ]
+#                 # Check if exists in DB (Case-insensitive check is safer)
+#                 exists = Song.query.filter(func.lower(Song.audio_file) == filename.lower()).first()
+#                 if exists:
+#                     if not exists.cover_file:
+#                         basename_no_ext = os.path.splitext(filename)[0]
+#                         cover_key = None
+#                         search_bases = [
+#                             basename_no_ext,
+#                             basename_no_ext.replace(" ", "_"),
+#                             basename_no_ext.replace(" ", "-"),
+#                         ]
                         
-                        for base in search_bases:
-                            for ext in ['.jpg', '.jpeg', '.png', '.webp']:
-                                candidates = [
-                                    f"covers/{base}{ext}",
-                                    f"covers/{base}_cover{ext}",
-                                ]
-                                for cand in candidates:
-                                    if cand in r2_covers:
-                                        cover_key = os.path.basename(cand)
-                                        break
-                                if cover_key: break
-                            if cover_key: break
+#                         for base in search_bases:
+#                             for ext in ['.jpg', '.jpeg', '.png', '.webp']:
+#                                 candidates = [
+#                                     f"covers/{base}{ext}",
+#                                     f"covers/{base}_cover{ext}",
+#                                 ]
+#                                 for cand in candidates:
+#                                     if cand in r2_covers:
+#                                         cover_key = os.path.basename(cand)
+#                                         break
+#                                 if cover_key: break
+#                             if cover_key: break
                         
-                        if cover_key:
-                            print(f"   🩹 Healing missing cover for: {exists.title} -> Found {cover_key}")
-                            exists.cover_file = cover_key
-                            db.session.commit()
-                    continue
+#                         if cover_key:
+#                             print(f"   🩹 Healing missing cover for: {exists.title} -> Found {cover_key}")
+#                             exists.cover_file = cover_key
+#                             db.session.commit()
+#                     continue
 
-                # Add to DB
-                # Parse filename: "Artist - Title.mp3"
-                basename_no_ext = os.path.splitext(filename)[0]
+#                 # Add to DB
+#                 # Parse filename: "Artist - Title.mp3"
+#                 basename_no_ext = os.path.splitext(filename)[0]
                 
-                # Robust parsing strategies
-                if ' - ' in basename_no_ext:
-                    parts = basename_no_ext.split(' - ', 1)
-                    artist = parts[0].strip()
-                    title = parts[1].strip()
-                elif '_-_' in basename_no_ext:
-                    parts = basename_no_ext.split('_-_', 1)
-                    artist = parts[0].replace('_', ' ').strip()
-                    title = parts[1].replace('_', ' ').strip()
-                else:
-                    artist = "Unknown" # Changed from (R2) to see if update applied
-                    title = basename_no_ext.replace('_', ' ')
+#                 # Robust parsing strategies
+#                 if ' - ' in basename_no_ext:
+#                     parts = basename_no_ext.split(' - ', 1)
+#                     artist = parts[0].strip()
+#                     title = parts[1].strip()
+#                 elif '_-_' in basename_no_ext:
+#                     parts = basename_no_ext.split('_-_', 1)
+#                     artist = parts[0].replace('_', ' ').strip()
+#                     title = parts[1].replace('_', ' ').strip()
+#                 else:
+#                     artist = "Unknown" # Changed from (R2) to see if update applied
+#                     title = basename_no_ext.replace('_', ' ')
 
-                # Clean title (remove [Official Video] etc if present)
-                title = re.sub(r'\s*\[.*?\]', '', title).strip()
+#                 # Clean title (remove [Official Video] etc if present)
+#                 title = re.sub(r'\s*\[.*?\]', '', title).strip()
 
-                # Check for cover match
-                # e.g. "audio/Artist - Title.mp3" tries to find "covers/Artist - Title.jpg/png/jpeg"
-                cover_key = None
-                search_bases = [
-                    basename_no_ext,
-                    basename_no_ext.replace(" ", "_"),
-                    basename_no_ext.replace(" ", "-"),
-                ]
+#                 # Check for cover match
+#                 # e.g. "audio/Artist - Title.mp3" tries to find "covers/Artist - Title.jpg/png/jpeg"
+#                 cover_key = None
+#                 search_bases = [
+#                     basename_no_ext,
+#                     basename_no_ext.replace(" ", "_"),
+#                     basename_no_ext.replace(" ", "-"),
+#                 ]
                 
-                for base in search_bases:
-                    for ext in ['.jpg', '.jpeg', '.png', '.webp']:
-                        candidates = [
-                            f"covers/{base}{ext}",
-                            f"covers/{base}_cover{ext}",
-                        ]
-                        for cand in candidates:
-                            if cand in r2_covers:
-                                cover_key = os.path.basename(cand)
-                                break
-                        if cover_key: break
-                    if cover_key: break
+#                 for base in search_bases:
+#                     for ext in ['.jpg', '.jpeg', '.png', '.webp']:
+#                         candidates = [
+#                             f"covers/{base}{ext}",
+#                             f"covers/{base}_cover{ext}",
+#                         ]
+#                         for cand in candidates:
+#                             if cand in r2_covers:
+#                                 cover_key = os.path.basename(cand)
+#                                 break
+#                         if cover_key: break
+#                     if cover_key: break
                 
-                try:
-                    song = Song(
-                        title=title,
-                        artist=artist,
-                        album="R2 Import",
-                        audio_file=filename,
-                        cover_file=cover_key,
-                        genre="Unknown",
-                        uploaded_by=None
-                    )
-                    db.session.add(song)
-                    db.session.commit() # Commit individually to isolate errors
-                    count += 1
-                    print(f"   -> Imported: {title} by {artist} (Cover: {'✅' if cover_key else '❌'})")
-                except IntegrityError:
-                    db.session.rollback()
-                    print(f"   ⚠️ Skipping duplicate (Integrity Error): {filename}")
-                except Exception as e:
-                    db.session.rollback()
-                    print(f"   ❌ Error importing {filename}: {e}")
+#                 try:
+#                     song = Song(
+#                         title=title,
+#                         artist=artist,
+#                         album="R2 Import",
+#                         audio_file=filename,
+#                         cover_file=cover_key,
+#                         genre="Unknown",
+#                         uploaded_by=None
+#                     )
+#                     db.session.add(song)
+#                     db.session.commit() # Commit individually to isolate errors
+#                     count += 1
+#                     print(f"   -> Imported: {title} by {artist} (Cover: {'✅' if cover_key else '❌'})")
+#                 except IntegrityError:
+#                     db.session.rollback()
+#                     print(f"   ⚠️ Skipping duplicate (Integrity Error): {filename}")
+#                 except Exception as e:
+#                     db.session.rollback()
+#                     print(f"   ❌ Error importing {filename}: {e}")
 
-        if count > 0:
-            print(f"✅ R2 Sync complete. Imported {count} new songs.")
-        else:
-             print("✅ R2 Sync complete. No new songs found.")
+#         if count > 0:
+#             print(f"✅ R2 Sync complete. Imported {count} new songs.")
+#         else:
+#              print("✅ R2 Sync complete. No new songs found.")
 
-    except Exception as e:
-        print(f"❌ R2 Sync Failed: {e}")
+#     except Exception as e:
+#         print(f"❌ R2 Sync Failed: {e}")
 
 # =========================================================
 # KEEP-ALIVE (FOR RENDER FREE TIER)
@@ -4873,7 +4872,7 @@ if __name__ == "__main__":
             db.session.commit()
             print("Auto-migrated: Added cover_file to playlist")
         except Exception as e:
-            db.session.rollback()
+            db.session.rollback() 
 
         # Auto-migration for PlayLog
         try:
