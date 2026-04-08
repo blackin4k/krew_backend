@@ -4966,7 +4966,7 @@ if __name__ == "__main__":
             
         # Sync with R2 (Production)
         try:
-            sync_r2_songs()
+            # sync_r2_songs()
         except Exception as e:
             print(f"R2 Sync failed: {e}")
 
@@ -5056,6 +5056,11 @@ else:
             
         try:
             print("Gunicorn startup: Syncing R2...")
-            sync_r2_songs()
+            # sync_r2_songs()
         except Exception as e:
             print(f"Startup Sync Error: {e}")
+
+
+
+
+#COMMIT NAHI HORA
