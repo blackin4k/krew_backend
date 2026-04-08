@@ -4965,10 +4965,10 @@ if __name__ == "__main__":
             print(f"Auto-import failed: {e}")
             
         # Sync with R2 (Production)
-        try:
-            # sync_r2_songs()
-        except Exception as e:
-            print(f"R2 Sync failed: {e}")
+        # try:
+        #     # sync_r2_songs()
+        # except Exception as e:
+        #     print(f"R2 Sync failed: {e}")   /BHENCHOD MERI MAA CHUD GAI ISKO DHUND TE DHUND TE 5 FUCKING HOURS (8-04-2026 6pm)
 
 
 
