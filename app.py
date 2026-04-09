@@ -4799,23 +4799,23 @@ def get_capsule_stats():
 # KEEP-ALIVE (FOR RENDER FREE TIER)
 # =========================================================
 
-def keep_alive_ping():
-    """Pings the backend health endpoint every 10 minutes to prevent sleeping."""
-    # Wait long enough for gunicorn worker to fully boot + DB pool to warm
-    time.sleep(30)
-    url = "https://api.kreewaux.xyz/health"
-    print(f"🚀 Keep-alive thread started, pinging {url} every 10 min")
+# def keep_alive_ping():
+#     """Pings the backend health endpoint every 10 minutes to prevent sleeping."""
+#     # Wait long enough for gunicorn worker to fully boot + DB pool to warm
+#     time.sleep(30)
+#     url = "https://api.kreewaux.xyz/health"
+#     print(f"🚀 Keep-alive thread started, pinging {url} every 10 min")
     
-    while True:
-        try:
-            requests.get(url, timeout=15)
-            # Don't spam stdout on success — only log failures
-        except Exception as e:
-            print(f"⚠️ Keep-alive ping failed: {e}")
-        time.sleep(600)  # 10 minutes
+#     while True:
+#         try:
+#             requests.get(url, timeout=15)
+#             # Don't spam stdout on success — only log failures
+#         except Exception as e:
+#             print(f"⚠️ Keep-alive ping failed: {e}")
+#         time.sleep(600)  # 10 minutes
 
-# Start the keep-alive thread as a daemon
-threading.Thread(target=keep_alive_ping, daemon=True).start()
+# # Start the keep-alive thread as a daemon
+# threading.Thread(target=keep_alive_ping, daemon=True).start()
 
 
 # =========================================================
