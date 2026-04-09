@@ -3,8 +3,8 @@
 # =========================================================
 
 # -------------------------
-from gevent import monkey
-monkey.patch_all()
+# from gevent import monkey
+# monkey.patch_all()      /BAHAHAHHA 
 
 import os
 import math
@@ -4796,7 +4796,7 @@ def get_capsule_stats():
 #         print(f"❌ R2 Sync Failed: {e}")
 
 # =========================================================
-# KEEP-ALIVE (FOR RENDER FREE TIER)
+# KEEP-ALIVE (FOR RENDER FREE TIER)                         //closed it cuz pussy ass render was killing it self , now we use uptimerobot 
 # =========================================================
 
 # def keep_alive_ping():
