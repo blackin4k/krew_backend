@@ -3117,7 +3117,7 @@ def get_player_queue():
         q_ids = []
 
     if not q_ids:
-        return jsonify(queue=[])
+        return jsonify(queue=[], current_song=state.current_song_id)
 
     # Fetch song metadata for the queue
     songs = []
@@ -3131,10 +3131,10 @@ def get_player_queue():
                 "id": s.id,
                 "title": s.title,
                 "artist": s.artist,
-                "cover": get_presigned_url(s.cover_path, "covers") if s.cover_path else None
+                "cover": get_presigned_url(s.cover_file, "covers") if s.cover_file else None
             })
 
-    return jsonify(queue=songs)
+    return jsonify(queue=songs, current_song=state.current_song_id)
 
 @app.route("/player/queue/add", methods=["POST"])
 @jwt_required()
@@ -3157,6 +3157,7 @@ def player_queue_add():
         state.shuffled_queue = json.dumps(shuffled)
 
     db.session.commit()
+    return jsonify(msg="Added to queue", queue=queue)
 @app.route("/player/queue/modify", methods=["POST"])
 @jwt_required()
 def player_queue_modify():
@@ -4037,12 +4038,16 @@ def capsule_stats():
     # For now, let's do "All Time" to ensure data shows up, or "Last 30 Days"
     
     # 1. Total Minutes
-    total_seconds = (
-        db.session.query(func.sum(PlayLog.listen_duration))
-        .filter(PlayLog.user_id == user_id)
-        .scalar()
-    ) or 0
-    total_minutes = int(total_seconds / 60)
+    try:
+        total_seconds = (
+            db.session.query(func.sum(PlayLog.listen_duration))
+            .filter(PlayLog.user_id == user_id)
+            .scalar()
+        ) or 0
+        total_minutes = int(total_seconds / 60)
+    except Exception:
+        total_seconds = 0
+        total_minutes = PlayLog.query.filter_by(user_id=user_id).count() * 3
     
     # 2. Top Songs
     top_songs_res = (
@@ -4558,7 +4563,7 @@ def get_streak_stats():
     })
 
 # 3. Capsule Stats
-@app.route("/capsule/stats")
+@app.route("/capsule/stats/legacy")
 @jwt_required()
 def get_capsule_stats():
     user_id = int(get_jwt_identity())
