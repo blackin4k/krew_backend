@@ -418,6 +418,10 @@ def player_play_top():
         return jsonify(error="song_id required"), 400
         
     song_id = int(data["song_id"])
+    song = Song.query.get(song_id)
+    if not song:
+        return jsonify(error="Song not found"), 404
+
     state = PlaybackState.query.filter_by(user_id=user_id).first()
     if not state:
          # Auto-create state if missing
@@ -453,12 +457,12 @@ def player_play_top():
 
     # Generate the vibe-based queue immediately
     autoplay_fill(state)
+
+    # Seed analytics/recents immediately, then let duration updates fill in later.
+    ensure_playlog_started(user_id, song_id)
     
     # Save the updated queue
     db.session.commit()
-
-    song = Song.query.get(song_id)
-    if not song: return jsonify(error="Song not found"), 404
 
     # Switch to R2 presigned URLs directly instead of proxying through Flask
     audio_url = get_presigned_url(song.audio_file, "audio")
@@ -1347,6 +1351,35 @@ def get_player(user_id):
     return state
 
 
+def ensure_playlog_started(user_id, song_id):
+    """
+    Seed a zero-duration play row when playback starts so recents/capsule
+    don't stay empty until the client later reports elapsed time.
+    """
+    cutoff = datetime.utcnow() - timedelta(minutes=20)
+    recent_log = (
+        PlayLog.query
+        .filter(
+            PlayLog.user_id == user_id,
+            PlayLog.song_id == song_id,
+            PlayLog.played_at >= cutoff
+        )
+        .order_by(PlayLog.played_at.desc())
+        .first()
+    )
+
+    if not recent_log:
+        db.session.add(
+            PlayLog(
+                user_id=user_id,
+                song_id=song_id,
+                played_at=datetime.utcnow(),
+                completed=False,
+                listen_duration=0
+            )
+        )
+
+
 def send_range_file(path):
     file_size = os.path.getsize(path)
     range_header = request.headers.get("Range", None)
@@ -1837,12 +1870,14 @@ def update_lyrics(song_id):
 def stream_song(song_id):
     song = Song.query.get_or_404(song_id)
 
-    # PROXY R2 AUDIO (Fixes CORS for Visualizer)
-    print(f"🎵 PROXY AUDIO: {song.title} ({song.audio_file})") # DEBUG LOG
+    # Default to redirecting the client straight to R2 so the Render worker
+    # does not sit in the middle of audio playback on free-tier hosting.
+    # Clients that truly need backend proxying can opt in with ?proxy=1.
     url = get_presigned_url(song.audio_file, "audio")
     if url:
-        if url.startswith("http"):
+        if request.args.get("proxy") == "1" and url.startswith("http"):
             try:
+                print(f"🎵 PROXY AUDIO: {song.title} ({song.audio_file})")
                 headers = {}
                 range_header = request.headers.get("Range", None)
                 if range_header:
@@ -1877,7 +1912,9 @@ def stream_song(song_id):
                 print(f"❌ Proxy Exception for audio {song.audio_file}: {e}")
                 return jsonify(error=str(e)), 500
 
-        return redirect(url)
+        resp = redirect(url)
+        resp.headers['Cache-Control'] = 'public, max-age=300'
+        return resp
 
     # Fallback: serve local file
     path = os.path.join(AUDIO_DIR, song.audio_file)
@@ -2241,7 +2278,7 @@ def player_state():
                 "id": song.id,
                 "title": song.title,
                 "artist": song.artist,
-                "audio": full_url(f"/songs/{song.id}/stream")
+                "audio": get_presigned_url(song.audio_file, "audio") if song.audio_file else None
             } if song else None
         ),
         "shuffle": state.shuffle,
@@ -3087,6 +3124,15 @@ def autoplay_fill(state):
             )
 
     if not related:
+        related = (
+            Song.query
+            .filter(Song.id.notin_(hard_excluded_ids))
+            .order_by(desc(Song.play_count), Song.id.desc())
+            .limit(10)
+            .all()
+        )
+
+    if not related:
         return
 
     new_ids = [s.id for s in related]
@@ -3115,6 +3161,17 @@ def get_player_queue():
             q_ids = json.loads(state.original_queue or "[]")
     except:
         q_ids = []
+
+    if not q_ids and state.current_song_id:
+        autoplay_fill(state)
+        db.session.commit()
+        try:
+            if state.shuffle:
+                q_ids = json.loads(state.shuffled_queue or "[]")
+            else:
+                q_ids = json.loads(state.original_queue or "[]")
+        except:
+            q_ids = []
 
     if not q_ids:
         return jsonify(queue=[], current_song=state.current_song_id)
@@ -3246,7 +3303,7 @@ def get_recent_tracks():
                 "title": s.title,
                 "artist": s.artist,
                 "cover": full_url(f"/covers/{s.cover_file}") if s.cover_file else None,
-                "audio": full_url(f"/songs/{s.id}/stream")
+                "audio": get_presigned_url(s.audio_file, "audio") if s.audio_file else None
             })
             seen.add(log.song_id)
             
