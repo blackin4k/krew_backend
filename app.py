@@ -154,24 +154,24 @@ s3_client = boto3.client(
 
 # Configure CORS on R2 bucket so Web Audio API (createMediaElementSource)
 # can analyze audio streams on Android/mobile without CORS tainting.
-# try:
-#     s3_client.put_bucket_cors(
-#         Bucket=R2_BUCKET_NAME,
-#         CORSConfiguration={
-#             'CORSRules': [
-#                 {
-#                     'AllowedOrigins': ['*'],
-#                     'AllowedMethods': ['GET', 'HEAD'],
-#                     'AllowedHeaders': ['*'],
-#                     'ExposeHeaders': ['Content-Length', 'Content-Type', 'Content-Range', 'Accept-Ranges'],
-#                     'MaxAgeSeconds': 86400
-#                 }
-#             ]
-#         }
-#     )
-#     print("✅ R2 bucket CORS configured (Allow-Origin: *)")
-# except Exception as e:
-#     print(f"⚠️ R2 CORS config skipped: {e}")
+try:
+    s3_client.put_bucket_cors(
+        Bucket=R2_BUCKET_NAME,
+        CORSConfiguration={
+            'CORSRules': [
+                {
+                    'AllowedOrigins': ['*'],
+                    'AllowedMethods': ['GET', 'HEAD'],
+                    'AllowedHeaders': ['*'],
+                    'ExposeHeaders': ['Content-Length', 'Content-Type', 'Content-Range', 'Accept-Ranges'],
+                    'MaxAgeSeconds': 86400
+                }
+            ]
+        }
+    )
+    print("✅ R2 bucket CORS configured (Allow-Origin: *)")
+except Exception as e:
+    print(f"⚠️ R2 CORS config skipped: {e}")
 
 def extract_metadata(file_path):
     """
@@ -1008,6 +1008,7 @@ class User(db.Model):
     artist_application_date = db.Column(db.DateTime, nullable=True)
     artist_bio = db.Column(db.Text, nullable=True)
 
+#THE FUCK AM I DOING ANYWAY
 
 class ArtistApplication(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -1499,7 +1500,7 @@ def get_artist_details(name):
             "albums": [],
             "top_tracks": []
         })
-
+#pray this works oct 10 2025
     # 2. Process Albums
     albums_map = {}
     for s in songs:
@@ -3761,7 +3762,7 @@ def jam_join(data):
     )
 
     emit("jam:listeners", list(jam_listeners[jam_id].values()), room=room)
-
+#lowkey sleepy af jan 18 2026
 @socketio.on("jam:play")
 def jam_play(data):
     user_id = socket_user_id(data.get("token"))
@@ -3871,7 +3872,7 @@ def jam_message(data):
         room=f"jam:{jam_id}"
     )
 
-
+#i bet this feature wont work after 3 days of launch jan 20 2026 
 @socketio.on("jam:vote_skip")
 def jam_vote_skip(data):
     """
@@ -4924,6 +4925,7 @@ def song_stats(song_id):
         "unique_listeners": unique_listeners
     })
 
+#GOD HELP THIS WAS HARD finally worked
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
@@ -5126,3 +5128,5 @@ else:
 
 
 #COMMIT NAHI HORA
+#bleh hogaya commit 
+
