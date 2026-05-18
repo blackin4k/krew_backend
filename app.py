@@ -12,14 +12,19 @@ import time
 import json
 import uuid
 import re
+import secrets
 import threading
+import subprocess
+import base64
 import requests
 from datetime import datetime, timedelta
 import random
 import hashlib
 from collections import defaultdict, Counter
+from functools import lru_cache, wraps
+from urllib.parse import urlparse
 from flask_jwt_extended import decode_token
-from sqlalchemy import or_, func, case, desc
+from sqlalchemy import or_, func, case, desc, inspect, text
 import boto3 # Added for R2
 from dotenv import load_dotenv
 load_dotenv() # Load environment variables
@@ -30,7 +35,7 @@ from mutagen.flac import FLAC
 from mutagen.wave import WAVE
 
 from sqlalchemy.exc import IntegrityError
-from flask import Flask, request, jsonify, send_file, send_from_directory, redirect, stream_with_context
+from flask import Flask, request, jsonify, send_file, send_from_directory, redirect, stream_with_context, abort
 from flask import Response
 from flask_sqlalchemy import SQLAlchemy
 import difflib # For fuzzy search
@@ -43,6 +48,7 @@ from flask_socketio import SocketIO, join_room, emit
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_cors import CORS
+from markupsafe import escape
 
 # =========================================================
 # PATHS + APP CONFIG (ORDER MATTERS)
@@ -69,7 +75,7 @@ if database_url:
     if database_url.startswith("postgres://"):
         database_url = database_url.replace("postgres://", "postgresql://", 1)
     # Ensure sslmode=require for Supabase connections
-    if "sslmode" not in database_url:
+    if database_url.startswith("postgresql://") and "sslmode" not in database_url:
         separator = "&" if "?" in database_url else "?"
         database_url += f"{separator}sslmode=require"
     app.config["SQLALCHEMY_DATABASE_URI"] = database_url
@@ -115,10 +121,17 @@ app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MiB upload limit
 db = SQLAlchemy(app)
 jwt = JWTManager(app)
 bcrypt = Bcrypt(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    message_queue=os.environ.get("SOCKETIO_MESSAGE_QUEUE"),
+)
 
 # Rate limiting
-limiter = Limiter(key_func=get_remote_address, storage_uri="memory://")
+limiter = Limiter(
+    key_func=get_remote_address,
+    storage_uri=os.environ.get("RATE_LIMIT_STORAGE_URI", "memory://"),
+)
 limiter.init_app(app)
 
 @app.route("/ping_top")
@@ -132,10 +145,88 @@ from werkzeug.utils import secure_filename
 
 ALLOWED_EXTENSIONS_AUDIO = {'mp3', 'wav', 'flac', 'm4a', 'ogg'}
 ALLOWED_EXTENSIONS_COVER = {'png', 'jpg', 'jpeg', 'gif'}
+ALLOWED_SPOTIFY_HOSTS = {"open.spotify.com", "spotify.com"}
+SPOTIFY_PLAYLIST_PATH_RE = re.compile(r"^/(?:intl-[^/]+/)?playlist/[A-Za-z0-9]+/?$")
+MAX_PAGE_SIZE = 100
 
 def allowed_file(filename, allowed_set):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in allowed_set
+
+
+def get_json_body():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        abort(400, description="JSON body required")
+    return data
+
+
+def normalize_email(value):
+    return (value or "").strip().lower()
+
+
+def normalize_username(value):
+    return (value or "").strip()
+
+
+def request_has_valid_admin_secret():
+    configured_secret = os.environ.get("ADMIN_SECRET")
+    provided_secret = request.headers.get("X-Admin-Secret")
+    return bool(
+        configured_secret
+        and provided_secret
+        and secrets.compare_digest(provided_secret, configured_secret)
+    )
+
+
+def get_current_user(optional=False):
+    try:
+        verify_jwt_in_request(optional=optional)
+    except Exception:
+        if optional:
+            return None
+        raise
+
+    identity = get_jwt_identity()
+    if identity is None:
+        return None
+
+    try:
+        return db.session.get(User, int(identity))
+    except (TypeError, ValueError):
+        return None
+
+
+def require_admin_user():
+    user = get_current_user(optional=False)
+    if not user or not getattr(user, "is_admin", False):
+        abort(403, description="Admin access required")
+    return user
+
+
+def require_admin_access():
+    if request_has_valid_admin_secret():
+        return None
+
+    user = get_current_user(optional=True)
+    if user and getattr(user, "is_admin", False):
+        return user
+
+    abort(403, description="Admin access required")
+
+
+def is_valid_spotify_playlist_url(raw_url):
+    try:
+        parsed = urlparse((raw_url or "").strip())
+    except ValueError:
+        return False
+
+    host = parsed.netloc.lower().split(":", 1)[0]
+    return (
+        parsed.scheme == "https"
+        and host in ALLOWED_SPOTIFY_HOSTS
+        and bool(SPOTIFY_PLAYLIST_PATH_RE.match(parsed.path))
+    )
 
 # R2 Configuration
 R2_ENDPOINT_URL = os.environ.get("R2_ENDPOINT_URL")
@@ -305,16 +396,16 @@ def upload_song():
                 }
             }), 201
 
+        return jsonify(error="Invalid file type"), 400
+
     except Exception as e:
-        print(f"Upload Error: {e}")
-        return jsonify(error=str(e)), 500
+        app.logger.exception("Artist upload failed")
+        return jsonify(error="Upload failed"), 500
 
 @app.route("/admin/upload", methods=["POST"])
 @limiter.limit("50 per day")
 def admin_upload_song():
-    admin_secret = request.headers.get("X-Admin-Secret")
-    if not admin_secret or admin_secret != os.environ.get("ADMIN_SECRET"):
-        return jsonify(error="Unauthorized"), 403
+    require_admin_access()
 
 
     if 'audio' not in request.files:
@@ -610,67 +701,82 @@ def record_play_top():
 
     verify_jwt_in_request()
     user_id = int(get_jwt_identity())
-    data = request.json or {}
+    data = get_json_body()
     song_id = data.get("song_id")
-    duration = data.get("duration", 0) # Accept duration, default to 0
+    duration = max(int(data.get("duration", 0) or 0), 0)
 
     if not song_id:
         return jsonify(error="song_id required"), 400
     
     try:
-        song_id = int(song_id) 
+        song_id = int(song_id)
         song = Song.query.get(song_id)
         if not song:
             return jsonify(msg="Song ignored"), 200
 
-        log = PlayLog(
-            user_id=user_id,
-            song_id=song_id,
-            played_at=datetime.utcnow(),
-            completed=True,
-            listen_duration=int(duration) # Store actual duration
+        cutoff = datetime.utcnow() - timedelta(minutes=20)
+        log = (
+            PlayLog.query
+            .filter(
+                PlayLog.user_id == user_id,
+                PlayLog.song_id == song_id,
+                PlayLog.played_at >= cutoff
+            )
+            .order_by(PlayLog.played_at.desc())
+            .first()
         )
-        db.session.add(log)
+        if log:
+            log.completed = True
+            log.listen_duration = max(log.listen_duration or 0, duration)
+        else:
+            db.session.add(
+                PlayLog(
+                    user_id=user_id,
+                    song_id=song_id,
+                    played_at=datetime.utcnow(),
+                    completed=True,
+                    listen_duration=duration,
+                )
+            )
         db.session.commit()
         return jsonify(msg="Recorded")
     except Exception as e:
-        return jsonify(error=str(e)), 500
+        app.logger.exception("Failed to record play")
+        return jsonify(error="Could not record play"), 500
 @app.route("/user-stats", methods=["GET"])
 @jwt_required()
 def user_stats():
     user_id = int(get_jwt_identity())
     
-    logs = PlayLog.query.filter_by(user_id=user_id).all()
-    recent_logs = sorted(logs, key=lambda x: x.played_at, reverse=True)[:3]
+    log_song_rows = (
+        db.session.query(PlayLog, Song)
+        .join(Song, PlayLog.song_id == Song.id)
+        .filter(PlayLog.user_id == user_id)
+        .order_by(PlayLog.played_at.desc())
+        .all()
+    )
     recent_tracks = []
-    
-    artist_counts = {}
-    genre_counts = {}
-    
-    # Calculate artist and genre counts
-    for log in logs:
-        s = db.session.get(Song, log.song_id)
-        if s:
-            artist_counts[s.artist] = artist_counts.get(s.artist, 0) + 1
-            if s.genre:
-                genre_counts[s.genre] = genre_counts.get(s.genre, 0) + 1
+    artist_counts = Counter()
+    genre_counts = Counter()
+    total_seconds = 0
 
-    # Get recent tracks
-    for log in recent_logs:
-        s = db.session.get(Song, log.song_id)
-        if s:
+    for index, (log, song) in enumerate(log_song_rows):
+        artist_counts[song.artist or "Unknown"] += 1
+        if song.genre:
+            genre_counts[song.genre] += 1
+        total_seconds += max(log.listen_duration or 0, 0)
+
+        if index < 3:
             recent_tracks.append({
-                "id": s.id,
-                "title": s.title,
-                "artist": s.artist,
-                "cover": full_url(f"/covers/{s.cover_file}") if s.cover_file else None
+                "id": song.id,
+                "title": song.title,
+                "artist": song.artist,
+                "cover": full_url(f"/covers/{song.cover_file}") if song.cover_file else None
             })
 
-    top_artist = max(artist_counts.items(), key=lambda x: x[1])[0] if artist_counts else "Unknown"
-    top_genre = max(genre_counts.items(), key=lambda x: x[1])[0] if genre_counts else "Unknown"
-    
-    # Extract total listen duration from PlayLog if it has listen_duration, otherwise default 3 mins
-    minutes_listened = sum([(getattr(log, 'listen_duration', 0) or 180) for log in logs]) // 60
+    top_artist = artist_counts.most_common(1)[0][0] if artist_counts else "Unknown"
+    top_genre = genre_counts.most_common(1)[0][0] if genre_counts else "Unknown"
+    minutes_listened = total_seconds // 60
     
     stats = {
         "minutes_listened": minutes_listened,
@@ -698,15 +804,14 @@ def get_user_profile_top():
         "id": user.id,
         "username": user.username,
         "email": user.email,
-        "is_supporter": getattr(user, 'is_supporter', False)
+        "is_supporter": getattr(user, 'is_supporter', False),
+        "is_admin": getattr(user, "is_admin", False),
     })
 
 
 @app.route("/admin/analytics", methods=["GET"])
 def get_analytics():
-    admin_secret = request.headers.get("X-Admin-Secret")
-    if not admin_secret or admin_secret != os.environ.get("ADMIN_SECRET"):
-        return jsonify(error="Unauthorized"), 403
+    require_admin_access()
 
     now = datetime.utcnow()
     dau = User.query.filter(User.last_active_at >= now - timedelta(days=1)).count()
@@ -836,9 +941,6 @@ R2_PUBLIC_URL = raw_r2_url.strip().strip("'").strip('"').rstrip("/")
 
 # Simple in-memory cache for presigned URLs (cleared hourly or on restart)
 # Key: (filename, folder), Value: (url, timestamp)
-from functools import lru_cache
-import time
-
 @lru_cache(maxsize=1000)
 def _cached_presigned_url(filename, folder, cache_bucket):
     """
@@ -943,7 +1045,8 @@ from werkzeug.exceptions import HTTPException
 def handle_error(e):
     if isinstance(e, HTTPException):
         return jsonify(error=e.description), e.code
-    return jsonify(error=str(e)), 500
+    app.logger.exception("Unhandled application error")
+    return jsonify(error="Internal server error"), 500
 
 @app.route("/health")
 def health_check():
@@ -1002,6 +1105,7 @@ class User(db.Model):
     
     last_active_at = db.Column(db.DateTime, default=datetime.utcnow)
     is_supporter = db.Column(db.Boolean, default=False)
+    is_admin = db.Column(db.Boolean, default=False, nullable=False)
     
     # Artist verification fields
     is_artist = db.Column(db.Boolean, default=False)
@@ -1164,12 +1268,22 @@ class SongRequest(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
-# =========================================================
-# AUTO-CREATE DATABASE TABLES ON STARTUP
-# =========================================================
-with app.app_context():
-    db.create_all()
-    print("✅ Database tables created/verified")
+class PlaylistImportJob(db.Model):
+    id = db.Column(db.String(36), primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    source_url = db.Column(db.String(500), nullable=False)
+    status = db.Column(db.String(20), default="pending", nullable=False, index=True)
+    playlist_id = db.Column(db.Integer, db.ForeignKey("playlist.id"), nullable=True)
+    imported_count = db.Column(db.Integer, default=0, nullable=False)
+    error_message = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
 
 # AUTH ROUTES
 # =========================================================
@@ -1180,7 +1294,7 @@ with app.app_context():
 
 @app.route('/request-song', methods=['POST'])
 def request_song():
-    data = request.json or {}
+    data = get_json_body()
 
     song_name = data.get('song', '')
     if not song_name or len(song_name.strip()) < 2:
@@ -1230,15 +1344,25 @@ def get_requests():
 
 @app.route("/auth/register", methods=["POST"])
 def register():
-    data = request.json
+    data = get_json_body()
+    username = normalize_username(data.get("username"))
+    email = normalize_email(data.get("email"))
+    password = data.get("password") or ""
+
+    if len(username) < 3:
+        return jsonify(error="Username must be at least 3 characters"), 400
+    if "@" not in email or len(email) > 120:
+        return jsonify(error="Valid email is required"), 400
+    if len(password) < 8:
+        return jsonify(error="Password must be at least 8 characters"), 400
 
     pw_hash = bcrypt.generate_password_hash(
-        data["password"]
+        password
     ).decode()
 
     user = User(
-        username=data["username"],
-        email=data["email"],
+        username=username,
+        email=email,
         password_hash=pw_hash
     )
 
@@ -1259,11 +1383,17 @@ from flask import make_response
 @app.route("/auth/login", methods=["POST"])
 @limiter.limit("5 per minute; 50 per hour")
 def login():
-    data = request.json
-    user = User.query.filter_by(username=data["username"]).first()
+    data = get_json_body()
+    username = normalize_username(data.get("username"))
+    password = data.get("password") or ""
+
+    if not username or not password:
+        return jsonify(error="Username and password are required"), 400
+
+    user = User.query.filter_by(username=username).first()
 
     if not user or not bcrypt.check_password_hash(
-        user.password_hash, data["password"]
+        user.password_hash, password
     ):
         return jsonify(error="Invalid credentials"), 401
 
@@ -1544,7 +1674,7 @@ def get_artist_details(name):
 @app.route("/songs", methods=["GET"])
 def get_songs():
     page = request.args.get("page", 1, type=int)
-    limit = request.args.get("limit", 30, type=int)
+    limit = min(max(request.args.get("limit", 30, type=int), 1), MAX_PAGE_SIZE)
     sort_by = request.args.get("sort", "random")  # Default to random for variety
 
     query = Song.query
@@ -1598,9 +1728,12 @@ def song_landing_page(song_id):
     song = Song.query.get_or_404(song_id)
     
     # Basic Metadata
-    title = song.title
-    artist = song.artist
+    title = song.title or "Unknown Title"
+    artist = song.artist or "Unknown Artist"
     cover_url = full_url(f"/covers/{song.cover_file}") if song.cover_file else "https://kreewaux.xyz/logo.png"
+    safe_title = escape(title)
+    safe_artist = escape(artist)
+    safe_cover_url = escape(cover_url)
     
     # Simple HTML Landing Page
     html = f"""
@@ -1611,13 +1744,13 @@ def song_landing_page(song_id):
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         
         <!-- Open Graph Data (for Discord/iMessage previews) -->
-        <meta property="og:title" content="{title} by {artist}">
+        <meta property="og:title" content="{safe_title} by {safe_artist}">
         <meta property="og:type" content="music.song">
-        <meta property="og:image" content="{cover_url}">
-        <meta property="og:description" content="Listen to {title} on Krew.">
+        <meta property="og:image" content="{safe_cover_url}">
+        <meta property="og:description" content="Listen to {safe_title} on Krew.">
         <meta property="og:site_name" content="Krew">
         
-        <title>{title} - Krew</title>
+        <title>{safe_title} - Krew</title>
         
         <style>
             body {{
@@ -1656,9 +1789,9 @@ def song_landing_page(song_id):
         </style>
     </head>
     <body>
-        <img src="{cover_url}" alt="Cover" class="cover">
-        <h1>{title}</h1>
-        <p>{artist}</p>
+        <img src="{safe_cover_url}" alt="Cover" class="cover">
+        <h1>{safe_title}</h1>
+        <p>{safe_artist}</p>
         
         <!-- Deep Link to App -->
         <a href="intent://song/{song_id}#Intent;scheme=https;package=com.krew.music;S.browser_fallback_url=https://play.google.com/store/apps/details?id=com.krew.music;end" class="btn">
@@ -1698,7 +1831,7 @@ def apply_as_artist():
         return jsonify(error="You already have a pending application"), 400
     
     # Validate required fields
-    data = request.get_json()
+    data = get_json_body()
     artist_name = data.get('artist_name', '').strip()
     bio = data.get('bio', '').strip()
     
@@ -1756,8 +1889,7 @@ def artist_status():
 @jwt_required()
 def get_artist_applications():
     """Get all pending artist applications (admin only)"""
-    # TODO: Add admin role check in production
-    # For now, any logged-in user can view (you can review manually)
+    require_admin_user()
     
     applications = ArtistApplication.query.filter_by(status='pending').order_by(
         ArtistApplication.created_at.desc()
@@ -1784,8 +1916,8 @@ def get_artist_applications():
 @jwt_required()
 def approve_artist_application(app_id):
     """Approve an artist application (admin only)"""
-    # TODO: Add admin role check in production
-    admin_id = int(get_jwt_identity())
+    admin_user = require_admin_user()
+    admin_id = admin_user.id
     
     application = db.session.get(ArtistApplication, app_id)
     if not application:
@@ -1815,8 +1947,8 @@ def approve_artist_application(app_id):
 @jwt_required()
 def reject_artist_application(app_id):
     """Reject an artist application (admin only)"""
-    # TODO: Add admin role check in production
-    admin_id = int(get_jwt_identity())
+    admin_user = require_admin_user()
+    admin_id = admin_user.id
     
     application = db.session.get(ArtistApplication, app_id)
     if not application:
@@ -1910,8 +2042,8 @@ def stream_song(song_id):
 
                 return resp
             except Exception as e:
-                print(f"❌ Proxy Exception for audio {song.audio_file}: {e}")
-                return jsonify(error=str(e)), 500
+                app.logger.exception("Audio proxy failed for %s", song.audio_file)
+                return jsonify(error="Audio proxy failed"), 500
 
         resp = redirect(url)
         resp.headers['Cache-Control'] = 'public, max-age=300'
@@ -3617,9 +3749,9 @@ jam_skip_votes = {}     # { jam_id: set(user_ids) }
 jam_hosts = {}          # { jam_id: host_user_id }
 
 # Track socket -> jam association for cleanup and host handoff on disconnect
-import threading
 jam_lock = threading.RLock()
 jam_sockets = {}        # { sid: { jam_id, user_id } }
+jam_cleanup_started = False
 
 # MEMORY LEAK PREVENTION: Clean up inactive jam sessions
 JAM_INACTIVE_TIMEOUT = 7200  # 2 hours in seconds
@@ -3650,6 +3782,10 @@ def cleanup_inactive_jams():
 
 # Schedule periodic cleanup (runs every 30 minutes)
 def start_jam_cleanup_scheduler():
+    global jam_cleanup_started
+    if jam_cleanup_started:
+        return
+
     def run_cleanup():
         while True:
             time.sleep(1800)  # 30 minutes
@@ -3657,10 +3793,8 @@ def start_jam_cleanup_scheduler():
     
     cleanup_thread = threading.Thread(target=run_cleanup, daemon=True)
     cleanup_thread.start()
+    jam_cleanup_started = True
     print("🧹 Jam cleanup scheduler started")
-
-# Start cleanup on app load
-start_jam_cleanup_scheduler()
 
 
 
@@ -4172,73 +4306,62 @@ def capsule_stats():
 
 
 # =========================================================
-# INIT
-# =========================================================
-
-with app.app_context():
-    if is_dev:
-        db.create_all()
-        auto_import_songs()
-
-if __name__ == "__main__":
-    sync_songs()
-    with app.app_context():
-        db.create_all()
-        # Auto-migration for cover_file
-        try:
-            from sqlalchemy import text
-            db.session.execute(text("ALTER TABLE playlist ADD COLUMN cover_file VARCHAR(255)"))
-            db.session.commit()
-            print("Auto-migrated: Added cover_file to playlist")
-        except Exception as e:
-            pass
-
-        # Auto-migration for PlayLog
-        try:
-            db.session.execute(text("ALTER TABLE play_logs ADD COLUMN completed BOOLEAN DEFAULT 0"))
-            db.session.commit()
-            print("Auto-migrated: Added completed to play_logs")
-        except Exception:
-            pass
-
-        try:
-            db.session.execute(text("ALTER TABLE play_logs ADD COLUMN listen_duration INTEGER DEFAULT 0"))
-            db.session.commit()
-            print("Auto-migrated: Added listen_duration to play_logs")
-        except Exception:
-            pass
-
-        # Auto-migration for Song upgrades
-        try:
-            db.session.execute(text("ALTER TABLE song ADD COLUMN duration INTEGER DEFAULT 0"))
-            db.session.commit()
-            print("Auto-migrated: Added duration to song")
-        except Exception:
-            pass
-
-        try:
-            db.session.execute(text("ALTER TABLE song ADD COLUMN play_count INTEGER DEFAULT 0"))
-            db.session.commit()
-            print("Auto-migrated: Added play_count to song")
-        except Exception:
-            pass
-
-        try:
-            db.session.execute(text("ALTER TABLE song ADD COLUMN audio_hash VARCHAR(64)"))
-            db.session.commit()
-            print("Auto-migrated: Added audio_hash to song")
-        except Exception:
-            pass
-
-    socketio.run(app, debug=True, host="0.0.0.0", port=5000)
-
-# =========================================================
 # SPOTIFY IMPORT (via Scraping + yt-dlp)
 # =========================================================
-import subprocess
-import requests
-import re
-import base64
+
+STARTUP_MIGRATIONS = [
+    ("playlist", "cover_file", "ALTER TABLE playlist ADD COLUMN cover_file VARCHAR(255)"),
+    ("play_logs", "completed", "ALTER TABLE play_logs ADD COLUMN completed BOOLEAN DEFAULT 0"),
+    ("play_logs", "listen_duration", "ALTER TABLE play_logs ADD COLUMN listen_duration INTEGER DEFAULT 0"),
+    ("song", "duration", "ALTER TABLE song ADD COLUMN duration INTEGER DEFAULT 0"),
+    ("song", "play_count", "ALTER TABLE song ADD COLUMN play_count INTEGER DEFAULT 0"),
+    ("song", "audio_hash", "ALTER TABLE song ADD COLUMN audio_hash VARCHAR(64)"),
+    ("playback_state", "autoplay_mode", "ALTER TABLE playback_state ADD COLUMN autoplay_mode VARCHAR(20) DEFAULT 'focused'"),
+    ("user", "last_active_at", 'ALTER TABLE "user" ADD COLUMN last_active_at TIMESTAMP'),
+    ("user", "is_supporter", 'ALTER TABLE "user" ADD COLUMN is_supporter BOOLEAN DEFAULT FALSE'),
+    ("user", "is_artist", 'ALTER TABLE "user" ADD COLUMN is_artist BOOLEAN DEFAULT FALSE'),
+    ("user", "artist_application_date", 'ALTER TABLE "user" ADD COLUMN artist_application_date TIMESTAMP'),
+    ("user", "artist_bio", 'ALTER TABLE "user" ADD COLUMN artist_bio TEXT'),
+    ("user", "is_admin", 'ALTER TABLE "user" ADD COLUMN is_admin BOOLEAN DEFAULT FALSE'),
+]
+
+startup_lock = threading.Lock()
+startup_complete = False
+
+
+def run_safe_startup_migrations():
+    inspector = inspect(db.engine)
+    existing_tables = set(inspector.get_table_names())
+
+    for table_name, column_name, sql in STARTUP_MIGRATIONS:
+        if table_name not in existing_tables:
+            continue
+
+        existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
+        if column_name in existing_columns:
+            continue
+
+        with db.engine.begin() as conn:
+            conn.execute(text(sql))
+        app.logger.info("Auto-migrated %s.%s", table_name, column_name)
+
+
+def initialize_application():
+    global startup_complete
+
+    with startup_lock:
+        if startup_complete:
+            return
+
+        with app.app_context():
+            db.create_all()
+            run_safe_startup_migrations()
+
+            if is_dev and os.environ.get("AUTO_IMPORT_LOCAL_SONGS", "1") == "1":
+                auto_import_songs()
+
+        start_jam_cleanup_scheduler()
+        startup_complete = True
 
 def fetch_spotify_tracks(playlist_url):
     """
@@ -4246,11 +4369,14 @@ def fetch_spotify_tracks(playlist_url):
     decodes it (Base64 -> JSON), and extracts tracks.
     Returns a list of clean "Title - Artist" strings.
     """
+    if not is_valid_spotify_playlist_url(playlist_url):
+        return []
+
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
-        r = requests.get(playlist_url, headers=headers)
+        r = requests.get(playlist_url, headers=headers, timeout=15)
         if r.status_code != 200:
             print(f"Failed to fetch Spotify page: {r.status_code}")
             return []
@@ -4301,12 +4427,40 @@ def fetch_spotify_tracks(playlist_url):
         print(f"Failed to parse spotify playlist: {e}")
         return []
 
+
+def find_existing_song_for_query(query):
+    title_part, _, artist_part = query.partition(" - ")
+    title_part = title_part.strip()
+    artist_part = artist_part.strip()
+
+    if title_part and artist_part:
+        existing = (
+            Song.query
+            .filter(Song.title.ilike(f"%{title_part}%"))
+            .filter(Song.artist.ilike(f"%{artist_part}%"))
+            .first()
+        )
+        if existing:
+            return existing
+
+    if title_part:
+        return Song.query.filter(Song.title.ilike(f"%{title_part}%")).first()
+
+    return None
+
+
 def find_and_download_song(query):
     """
     1. Search DB for existing song (simple fuzzy match not implemented yet, doing exact check).
     2. If not found, download via yt-dlp.
     Returns Song object or None.
     """
+    existing_song = find_existing_song_for_query(query)
+    if existing_song:
+        return existing_song
+
+    cover_path = None
+    filepath = None
     try:
         # Construct specific filename to avoid duplicates/collisions
         temp_id = uuid.uuid4().hex
@@ -4317,13 +4471,14 @@ def find_and_download_song(query):
             "yt-dlp",
             f"ytsearch1:{query}",
             "-x", "--audio-format", "mp3",
+            "--no-playlist",
             "--add-metadata",
             "--embed-thumbnail",
             "-o", f"{app.config['UPLOAD_AUDIO']}/{temp_id}.%(ext)s",
             "--print-json" # print metadata
         ]
         
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
         
         if result.returncode != 0:
             print(f"Download failed for {query}: {result.stderr}")
@@ -4352,6 +4507,11 @@ def find_and_download_song(query):
             # fallback checks
             return None
 
+        audio_hash = get_audio_hash(filepath)
+        existing_by_hash = Song.query.filter_by(audio_hash=audio_hash).first()
+        if existing_by_hash:
+            return existing_by_hash
+
         # Create Song Record
         # Extract metadata
         title = info.get("title", query)
@@ -4363,14 +4523,17 @@ def find_and_download_song(query):
         
         thumbnail_url = info.get("thumbnail")
         if thumbnail_url:
-             import requests
              try:
-                 r = requests.get(thumbnail_url)
+                 r = requests.get(thumbnail_url, timeout=15)
                  if r.status_code == 200:
                      with open(cover_path, 'wb') as f:
                          f.write(r.content)
+                 else:
+                     cover_filename = None
              except:
                  cover_filename = None # failed
+        else:
+            cover_filename = None
 
         song = Song(
             title=title,
@@ -4378,7 +4541,8 @@ def find_and_download_song(query):
             album="Imported",
             audio_file=filename,
             cover_file=cover_filename,
-            genre="Imported"
+            genre="Imported",
+            audio_hash=audio_hash,
         )
         db.session.add(song)
         db.session.commit()
@@ -4387,56 +4551,133 @@ def find_and_download_song(query):
     except Exception as e:
         print(f"Download exception: {e}")
         return None
+    finally:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+        if filepath and os.path.exists(filepath):
+            existing_song = Song.query.filter_by(audio_file=os.path.basename(filepath)).first()
+            if not existing_song:
+                os.remove(filepath)
+        if cover_path and os.path.exists(cover_path):
+            existing_cover = Song.query.filter_by(cover_file=os.path.basename(cover_path)).first()
+            if not existing_cover:
+                os.remove(cover_path)
+
+
+def process_spotify_import_job(job_id):
+    with app.app_context():
+        job = db.session.get(PlaylistImportJob, job_id)
+        if not job or job.status != "pending":
+            return
+
+        try:
+            job.status = "running"
+            db.session.commit()
+
+            track_queries = fetch_spotify_tracks(job.source_url)
+            if not track_queries:
+                job.status = "failed"
+                job.error_message = "Could not parse playlist tracks from Spotify."
+                db.session.commit()
+                return
+
+            playlist = Playlist(
+                name=f"Imported Playlist {datetime.utcnow().strftime('%H:%M')}",
+                owner_id=job.user_id,
+            )
+            db.session.add(playlist)
+            db.session.commit()
+
+            success_count = 0
+            max_songs = min(max(int(os.environ.get("SPOTIFY_IMPORT_MAX_TRACKS", 10)), 1), 25)
+
+            for query in track_queries[:max_songs]:
+                song = find_and_download_song(query)
+                if not song:
+                    continue
+
+                existing_item = PlaylistSong.query.filter_by(
+                    playlist_id=playlist.id,
+                    song_id=song.id,
+                ).first()
+                if existing_item:
+                    continue
+
+                db.session.add(PlaylistSong(playlist_id=playlist.id, song_id=song.id))
+                success_count += 1
+
+            job.playlist_id = playlist.id
+            job.imported_count = success_count
+            job.status = "completed"
+            db.session.commit()
+        except Exception as exc:
+            db.session.rollback()
+            job = db.session.get(PlaylistImportJob, job_id)
+            if job:
+                job.status = "failed"
+                job.error_message = str(exc)
+                db.session.commit()
+            app.logger.exception("Spotify import job failed")
+
+
+def start_spotify_import_job(job_id):
+    threading.Thread(
+        target=process_spotify_import_job,
+        args=(job_id,),
+        daemon=True,
+    ).start()
 
 
 @app.route("/playlists/import/spotify", methods=["POST"])
 @jwt_required()
+@limiter.limit("3 per hour")
 def import_spotify_playlist():
-    print(">>> INVOKED: import_spotify_playlist")
     user_id = int(get_jwt_identity())
-    # user_id = 1 # Mock user ID for testing
-    data = request.json
-    url = data.get("url")
-    print(f"Import URL: {url}")
-    
+    data = get_json_body()
+    url = (data.get("url") or "").strip()
+
     if not url:
         return jsonify(error="URL required"), 400
 
-    # Clean URL (remove query params)
-    url = url.split('?')[0]
+    if not is_valid_spotify_playlist_url(url):
+        return jsonify(error="Only https://open.spotify.com/playlist/... URLs are allowed"), 400
 
-    track_queries = fetch_spotify_tracks(url)
-    
-    if not track_queries:
-        return jsonify(error="Could not find tracks or playlist is invalid"), 400
-
-    playlist = Playlist(
-        name=f"Imported Playlist {datetime.now().strftime('%H:%M')}",
-        owner_id=user_id
+    job = PlaylistImportJob(
+        id=str(uuid.uuid4()),
+        user_id=user_id,
+        source_url=url,
+        status="pending",
     )
-    db.session.add(playlist)
+    db.session.add(job)
     db.session.commit()
 
-    success_count = 0
-    max_songs = 10
-    
-    imported_songs = []
-    
-    for q in track_queries[:max_songs]:
-        song = find_and_download_song(q)
-        if song:
-            item = PlaylistSong(playlist_id=playlist.id, song_id=song.id)
-            db.session.add(item)
-            success_count += 1
-            imported_songs.append(song.title)
-    
-    db.session.commit()
-    
+    start_spotify_import_job(job.id)
+
     return jsonify({
-        "msg": f"Imported {success_count} songs",
-        "playlist_id": playlist.id,
-        "playlist_name": playlist.name,
-        "tracks": imported_songs
+        "msg": "Import queued",
+        "job_id": job.id,
+        "status": job.status,
+    }), 202
+
+
+@app.route("/playlists/import/spotify/<job_id>", methods=["GET"])
+@jwt_required()
+def get_spotify_import_status(job_id):
+    user_id = int(get_jwt_identity())
+    job = db.session.get(PlaylistImportJob, job_id)
+    if not job or job.user_id != user_id:
+        return jsonify(error="Import job not found"), 404
+
+    return jsonify({
+        "job_id": job.id,
+        "status": job.status,
+        "playlist_id": job.playlist_id,
+        "imported_count": job.imported_count,
+        "error": job.error_message,
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat(),
     })
 # =========================================================
 # HISTORY & CAPSULE
@@ -4446,179 +4687,6 @@ def import_spotify_playlist():
 @app.route("/ping", methods=["GET"])
 def ping():
     return jsonify(msg="pong")
-
-# 1. Record Play
-@app.route("/player/record-play", methods=["POST", "OPTIONS"])
-def record_play():
-    if request.method == "OPTIONS":
-        return jsonify(msg="Preflight OK")
-
-    verify_jwt_in_request()
-    user_id = int(get_jwt_identity())
-    data = request.json or {}
-    song_id = data.get("song_id")
-    duration = int(data.get("duration", 0))  # Accept duration from client
-
-    if not song_id:
-        return jsonify(error="song_id required"), 400
-    
-    # Verify song exists
-    try:
-        song_id = int(song_id) # Ensure int
-        song = Song.query.get(song_id)
-        if not song:
-            print(f"⚠️ record_play: Song {song_id} not found (ignored)")
-            return jsonify(msg="Song ignored"), 200
-
-        # Log it with duration
-        log = PlayLog(
-            user_id=user_id,
-            song_id=song_id,
-            played_at=datetime.utcnow(),
-            completed=True,
-            listen_duration=duration  # Use actual duration from client
-        )
-        db.session.add(log)
-        db.session.commit()
-        print(f"✅ record_play: Logged song {song_id} for user {user_id} (duration: {duration}s)")
-
-        return jsonify(msg="Recorded")
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        print(f"❌ record_play CRASH: {e}")
-        return jsonify(error=str(e)), 500
-
-# 1.5 Get User Profile
-@app.route("/me", methods=["GET"])
-@jwt_required()
-def get_user_profile():
-    user_id = int(get_jwt_identity())
-    user = User.query.get(user_id)
-    if not user:
-        return jsonify(error="User not found"), 404
-        
-    return jsonify({
-        "id": user.id,
-        "username": user.username,
-        "email": user.email
-    })
-
-
-@app.route("/me/recent")
-@jwt_required()
-def get_recent():
-    user_id = int(get_jwt_identity())
-    
-    # Get last 50 plays
-    logs = (
-        db.session.query(PlayLog, Song)
-        .join(Song, PlayLog.song_id == Song.id)
-        .filter(PlayLog.user_id == user_id)
-        .order_by(PlayLog.played_at.desc())
-        .limit(50)
-        .all()
-    )
-
-    # Dedup by song_id consecutive? Or just list them? 
-    # Usually recents is a straight list. 
-    # Let's map to song objects.
-    
-    return jsonify([
-        {
-            "id": s.id,
-            "title": s.title,
-            "artist": s.artist,
-            "cover": full_url(f"/covers/{s.cover_file}") if s.cover_file else None,
-            "played_at": log.played_at.isoformat()
-        }
-        for log, s in logs
-    ])
-
-# 2. Get User Streak & Stats
-@app.route("/me/streak")
-@jwt_required()
-def get_streak_stats():
-    user_id = int(get_jwt_identity())
-    now = datetime.utcnow()
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    # 1. Minutes Played Today
-    # Sum listen_duration for plays today
-    todays_play_time = (
-        db.session.query(func.sum(PlayLog.listen_duration))
-        .filter(PlayLog.user_id == user_id)
-        .filter(PlayLog.played_at >= today_start)
-        .scalar()
-    ) or 0
-    minutes_today = int(todays_play_time / 60)
-
-    # 2. Top Genre (Last 7 Days)
-    week_start = today_start - timedelta(days=7)
-    top_genre_entry = (
-        db.session.query(Song.genre, func.count(PlayLog.id).label("count"))
-        .join(PlayLog, PlayLog.song_id == Song.id)
-        .filter(PlayLog.user_id == user_id)
-        .filter(PlayLog.played_at >= week_start)
-        .filter(Song.genre != None)
-        .filter(Song.genre != "Unknown")
-        .group_by(Song.genre)
-        .order_by(desc("count"))
-        .first()
-    )
-    top_genre = top_genre_entry[0] if top_genre_entry else "Music"
-
-    # 3. Calculate Streak (Consecutive Days Active)
-    # Get all distinct dates user played music, ordered desc
-    # SQLite 'date()' function might differ from Postgres. verify usage.
-    # For compatibility, we fetch dates and process in python (safer for small-med scale)
-    
-    # Efficient enough: Fetch distinct dates from last 365 days
-    year_start = today_start - timedelta(days=365)
-    
-    # SQLAlchemy logic for "date(played_at)"
-    # SQL: SELECT DISTINCT date(played_at) FROM play_logs WHERE ...
-    # This varies by DB. 
-    # Let's just fetch all 'played_at' for the user in last month/year and compute set in python
-    # To be safe against massive logs, just selecting dates is better but we might have many logs.
-    # Let's try to group by date in SQL if possible, but fallback to python for safety across SQLite/PG.
-    
-    logs = (
-        db.session.query(PlayLog.played_at)
-        .filter(PlayLog.user_id == user_id)
-        .filter(PlayLog.played_at >= year_start)
-        .order_by(PlayLog.played_at.desc())
-        .all()
-    )
-    
-    active_dates = {log.played_at.date() for log in logs}
-    
-    streak = 0
-    check_date = now.date()
-    
-    # If played today, streak starts today. If not, check yesterday.
-    if check_date not in active_dates:
-        check_date = check_date - timedelta(days=1)
-        if check_date not in active_dates:
-             # Streak broken or 0
-             pass
-        else:
-             streak = 1
-             check_date = check_date - timedelta(days=1)
-    else:
-        streak = 1
-        check_date = check_date - timedelta(days=1)
-
-    # Count backwards
-    while check_date in active_dates:
-        streak += 1
-        check_date = check_date - timedelta(days=1)
-
-    return jsonify({
-        "streak_days": streak,
-        "minutes_today": minutes_today,
-        "top_genre": top_genre
-    })
 
 # 3. Capsule Stats
 @app.route("/capsule/stats/legacy")
@@ -4888,7 +4956,7 @@ def get_capsule_stats():
 @app.route("/stats/global", methods=["GET"])
 def global_stats():
     """Get most played songs platform-wide"""
-    limit = int(request.args.get("limit", 20))
+    limit = min(max(request.args.get("limit", 20, type=int) or 20, 1), MAX_PAGE_SIZE)
     
     results = (
         db.session.query(Song, func.count(PlayLog.id).label("plays"))
@@ -4925,208 +4993,8 @@ def song_stats(song_id):
         "unique_listeners": unique_listeners
     })
 
-#GOD HELP THIS WAS HARD finally worked
+initialize_application()
+
 if __name__ == "__main__":
-    with app.app_context():
-        db.create_all()
-        # Auto-migration for cover_file
-        try:
-            from sqlalchemy import text
-            db.session.execute(text("ALTER TABLE playlist ADD COLUMN cover_file VARCHAR(255)"))
-            db.session.commit()
-            print("Auto-migrated: Added cover_file to playlist")
-        except Exception as e:
-            db.session.rollback() 
-
-        # Auto-migration for PlayLog
-        try:
-            db.session.execute(text("ALTER TABLE play_logs ADD COLUMN completed BOOLEAN DEFAULT 0"))
-            db.session.commit()
-            print("Auto-migrated: Added completed to play_logs")
-        except Exception:
-            db.session.rollback()
-
-        try:
-            db.session.execute(text("ALTER TABLE play_logs ADD COLUMN listen_duration INTEGER DEFAULT 0"))
-            db.session.commit()
-            print("Auto-migrated: Added listen_duration to play_logs")
-        except Exception:
-            db.session.rollback()
-
-        try:
-            from sqlalchemy import text
-            db.session.execute(text('ALTER TABLE "user" ADD COLUMN last_active_at TIMESTAMP'))
-            db.session.commit()
-            print("Auto-migrated: Added last_active_at to user")
-        except Exception:
-            db.session.rollback()
-
-        try:
-            from sqlalchemy import text
-            db.session.execute(text('ALTER TABLE "user" ADD COLUMN is_supporter BOOLEAN DEFAULT FALSE'))
-            db.session.commit()
-            print("Auto-migrated: Added is_supporter to user")
-        except Exception:
-            db.session.rollback()
-
-        try:
-            from sqlalchemy import text
-            db.session.execute(text('ALTER TABLE "user" ADD COLUMN is_artist BOOLEAN DEFAULT FALSE'))
-            db.session.commit()
-            print("Auto-migrated: Added is_artist to user")
-        except Exception:
-            db.session.rollback()
-
-        try:
-            from sqlalchemy import text
-            db.session.execute(text('ALTER TABLE "user" ADD COLUMN artist_application_date TIMESTAMP'))
-            db.session.commit()
-            print("Auto-migrated: Added artist_application_date to user")
-        except Exception:
-            db.session.rollback()
-
-        try:
-            from sqlalchemy import text
-            db.session.execute(text('ALTER TABLE "user" ADD COLUMN artist_bio TEXT'))
-            db.session.commit()
-            print("Auto-migrated: Added artist_bio to user")
-        except Exception:
-            db.session.rollback()
-
-        # Auto-migration for Song upgrades
-        try:
-            db.session.execute(text("ALTER TABLE song ADD COLUMN duration INTEGER DEFAULT 0"))
-            db.session.commit()
-            print("Auto-migrated: Added duration to song")
-        except Exception:
-            db.session.rollback()
-
-        try:
-            db.session.execute(text("ALTER TABLE song ADD COLUMN play_count INTEGER DEFAULT 0"))
-            db.session.commit()
-            print("Auto-migrated: Added play_count to song")
-        except Exception:
-            db.session.rollback()
-
-        try:
-            db.session.execute(text("ALTER TABLE song ADD COLUMN audio_hash VARCHAR(64)"))
-            db.session.commit()
-            print("Auto-migrated: Added audio_hash to song")
-        except Exception:
-            db.session.rollback()
-
-        try:
-            db.session.execute(text("ALTER TABLE playback_state ADD COLUMN autoplay_mode VARCHAR(20) DEFAULT 'focused'"))
-            db.session.commit()
-            print("Auto-migrated: Added autoplay_mode to playback_state")
-        except Exception:
-            db.session.rollback()
-            
-        # Auto-import songs on startup
-        try:
-            auto_import_songs()
-        except Exception as e:
-            print(f"Auto-import failed: {e}")
-            
-        # Sync with R2 (Production)
-        # try:
-        #     # sync_r2_songs()
-        # except Exception as e:
-        #     print(f"R2 Sync failed: {e}")   /BHENCHOD MERI MAA CHUD GAI ISKO DHUND TE DHUND TE 5 FUCKING HOURS (8-04-2026 6pm)
-
-
-
-    socketio.run(app, debug=True, host="0.0.0.0", port=5000)
-
-# =========================================================
-# PRODUCTION STARTUP (GUNICORN)
-# =========================================================
-else:
-    # This block runs when imported (e.g. by gunicorn)
-    with app.app_context():
-        # Auto-migration for Song upgrades (Gunicorn/Render Production)
-        try:
-            from sqlalchemy import text
-            db.session.execute(text("ALTER TABLE song ADD COLUMN duration INTEGER DEFAULT 0"))
-            db.session.commit()
-            print("Auto-migrated (Prod): Added duration to song")
-        except Exception:
-            db.session.rollback()
-
-        try:
-            from sqlalchemy import text
-            db.session.execute(text("ALTER TABLE song ADD COLUMN play_count INTEGER DEFAULT 0"))
-            db.session.commit()
-            print("Auto-migrated (Prod): Added play_count to song")
-        except Exception:
-            db.session.rollback()
-
-        try:
-            from sqlalchemy import text
-            db.session.execute(text("ALTER TABLE song ADD COLUMN audio_hash VARCHAR(64)"))
-            db.session.commit()
-            print("Auto-migrated (Prod): Added audio_hash to song")
-        except Exception:
-            db.session.rollback()
-
-        try:
-            from sqlalchemy import text
-            with db.engine.begin() as conn:
-                conn.execute(text("ALTER TABLE playback_state ADD COLUMN autoplay_mode VARCHAR(20) DEFAULT 'focused'"))
-            print("Auto-migrated (Prod): Added autoplay_mode to playback_state")
-        except Exception as e:
-            print(f"Migration skip (autoplay_mode): {e}")
-
-        try:
-            from sqlalchemy import text
-            with db.engine.begin() as conn:
-                conn.execute(text('ALTER TABLE "user" ADD COLUMN last_active_at TIMESTAMP'))
-            print("Auto-migrated (Prod): Added last_active_at to user")
-        except Exception as e:
-            print(f"Migration skip (last_active_at): {e}")
-
-        try:
-            from sqlalchemy import text
-            with db.engine.begin() as conn:
-                conn.execute(text('ALTER TABLE "user" ADD COLUMN is_supporter BOOLEAN DEFAULT FALSE'))
-            print("Auto-migrated (Prod): Added is_supporter to user")
-        except Exception as e:
-            print(f"Migration skip (is_supporter): {e}")
-
-        try:
-            from sqlalchemy import text
-            with db.engine.begin() as conn:
-                conn.execute(text('ALTER TABLE "user" ADD COLUMN is_artist BOOLEAN DEFAULT FALSE'))
-            print("Auto-migrated (Prod): Added is_artist to user")
-        except Exception as e:
-            print(f"Migration skip (is_artist): {e}")
-
-        try:
-            from sqlalchemy import text
-            with db.engine.begin() as conn:
-                conn.execute(text('ALTER TABLE "user" ADD COLUMN artist_application_date TIMESTAMP'))
-            print("Auto-migrated (Prod): Added artist_application_date to user")
-        except Exception as e:
-            print(f"Migration skip (artist_application_date): {e}")
-
-        try:
-            from sqlalchemy import text
-            with db.engine.begin() as conn:
-                conn.execute(text('ALTER TABLE "user" ADD COLUMN artist_bio TEXT'))
-            print("Auto-migrated (Prod): Added artist_bio to user")
-        except Exception as e:
-            print(f"Migration skip (artist_bio): {e}")
-            pass
-            
-        try:
-            print("Gunicorn startup: Syncing R2...")
-            # sync_r2_songs()
-        except Exception as e:
-            print(f"Startup Sync Error: {e}")
-
-
-
-
-#COMMIT NAHI HORA
-#bleh hogaya commit 
+    socketio.run(app, debug=is_dev, host="0.0.0.0", port=5000)
 

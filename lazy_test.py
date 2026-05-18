@@ -1,29 +1,30 @@
 import requests
 
-BASE = "http://127.0.0.1:5000"
 
-# login
-r = requests.post(f"{BASE}/auth/login", json={
-    "username": "testuser",
-    "password": "123456"
-})
+def main():
+    base = "http://127.0.0.1:5000"
 
-print("login:", r.text)
+    login_response = requests.post(
+        f"{base}/auth/login",
+        json={
+            "username": "testuser",
+            "password": "123456",
+        },
+    )
+    print("login:", login_response.text)
 
-token = r.json()["token"]
-headers = {"Authorization": f"Bearer {token}"}
+    token = login_response.json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
 
-# get songs
-songs = requests.get(f"{BASE}/songs").json()
-sid = songs[0]["id"]
+    songs = requests.get(f"{base}/songs").json()
+    sid = songs[0]["id"]
 
-# play
-requests.post(f"{BASE}/player/play", json={"song_id": sid}, headers=headers)
+    requests.post(f"{base}/player/play", json={"song_id": sid}, headers=headers)
+    requests.post(f"{base}/player/next", headers=headers)
+    requests.get(f"{base}/songs/{sid}/stream")
 
-# next
-requests.post(f"{BASE}/player/next", headers=headers)
+    print("✅ backend is alive")
 
-# stream
-requests.get(f"{BASE}/songs/{sid}/stream")
 
-print("✅ backend is alive")
+if __name__ == "__main__":
+    main()
